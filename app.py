@@ -50,7 +50,7 @@ def load_app_state(app_name):
                 last_release, dynos_json, config_vars_hash = row
                 return {
                     'last_release': last_release,
-                    'dynos': json.loads(dynos_json) if dynos_json else {},
+                    'dynos': json.loads(dynos_json) if isinstance(dynos_json, str) else (dynos_json or {}),
                     'config_vars_hash': config_vars_hash
                 }
             return {'last_release': None, 'dynos': {}, 'config_vars_hash': None}
