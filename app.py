@@ -338,9 +338,8 @@ def slack_command():
 
     # Handle /heroku-status command
     if command == '/heroku-status':
-        app_name = command_text.strip() or get_monitored_app()
 
-        if app_name.lower() == "help":
+        if command_text.lower() == "help":
         return jsonify({
             'response_type': 'ephemeral',
             'text': (
@@ -353,23 +352,42 @@ def slack_command():
             )
         })
 
+        app_name = command_text.strip() or get_monitored_app()
+
         if not app_name:
             return jsonify({
                 'response_type': 'ephemeral',
                 'text': '❌ Please specify an app name or configure monitoring via the web UI'
             })
 
-        status_info = get_app_status(app_name)
-
+        threading.Thread(target=fetch_and_post_status, args=(app_name, response_url)).start()
         return jsonify({
-            'response_type': 'in_channel',
-            'text': status_info
+            'response_type': 'ephemeral',
+            'text': f"⏳ Fetching status for `{app_name}`... You should see results shortly."
         })
 
     return jsonify({
         'response_type': 'ephemeral',
         'text': f'Unknown command: {command}'
     })
+
+
+
+def fetch_and_post_status(app_name, response_url):
+    """Fetch the Heroku status and post it asynchronously to Slack"""
+    try:
+        status_info = get_app_status(app_name)
+        requests.post(response_url, json={
+            'response_type': 'in_channel',
+            'text': status_info
+        })
+        logger.info(f"Posted status update for {app_name} to Slack")
+    except Exception as e:
+        logger.error(f"Failed to post status for {app_name}: {e}")
+        requests.post(response_url, json={
+            'response_type': 'ephemeral',
+            'text': f"❌ Failed to fetch status for `{app_name}`: {e}"
+        })
 
 
 def get_app_status(app_name):
