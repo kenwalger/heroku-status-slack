@@ -13,6 +13,7 @@ from typing import Dict, Optional, Any, List
 import psycopg2
 import psycopg2.extras
 
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -440,10 +441,40 @@ def check_app_health(app_name: str) -> None:
 
     save_app_state(app_name, state)
 
+
+# --------------------------
+# Heroku Release Tracking Utils
+# --------------------------
+
+def get_current_release(app_name, heroku_api_key):
+    """Fetch the latest release version from Heroku API."""
+    url = f"https://api.heroku.com/apps/{app_name}/releases"
+    headers = {
+        "Accept": "application/vnd.heroku+json; version=3",
+        "Authorization": f"Bearer {heroku_api_key}"
+    }
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    releases = resp.json()
+    latest_release = sorted(releases, key=lambda r: r['version'], reverse=True)[0]
+    return latest_release['version'], latest_release['created_at']
+
+def update_db_last_release(db_conn, app_name, version, created_at):
+    """Update app_state table with the latest release info."""
+    with db_conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO app_state (app_name, last_release, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (app_name)
+            DO UPDATE SET last_release = EXCLUDED.last_release,
+                          updated_at = EXCLUDED.updated_at
+        """, (app_name, version, created_at))
+        db_conn.commit()
+
+
 # --------------------------
 # Scheduler
 # --------------------------
-
 
 def initialize_scheduler_once():
     global scheduler_initialized
@@ -732,6 +763,19 @@ if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
         restart_scheduler()
     except Exception as e:
         logger.error(f"Error starting scheduler on boot: {e}")
+
+# Assuming dynamic_config has the monitored app name(s)
+heroku_api_key = os.environ.get("HEROKU_API_KEY")
+
+for monitored_app in dynamic_config.get('monitored_apps', []):
+    try:
+        current_version, release_time = get_current_release(monitored_app, heroku_api_key)
+        update_db_last_release(db_conn, monitored_app, current_version, release_time)
+        
+        # Optional: Send Slack notification here
+        send_slack_message(monitored_app, current_version, release_time)
+    except Exception as e:
+        app.logger.error(f"Failed to update release info for {monitored_app}: {e}")
 
 
 # --------------------------
