@@ -1,4 +1,5 @@
 import os
+import hashlib
 import json
 import logging
 import threading
@@ -323,8 +324,10 @@ def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> N
         created_at = latest.get('created_at', '')
         description = latest.get('description', 'No description')
 
+        noticed_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
         send_slack_message(
-            f"🚀 *New Deploy Detected* 🚀\n\n"
+            f"🚀 *New Deploy Detected at {noticed_at}* 🚀\n\n"
             f"App: `{app_name}`\n"
             f"Version: v{release_version}\n"
             f"Deployed by: {user_email}\n"
