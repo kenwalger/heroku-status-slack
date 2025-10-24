@@ -18,6 +18,7 @@ Each participant will deploy their own instance of the bot to Heroku, using thei
 + Detect new releases and deployments
 + Monitor configuration variable changes
 + Track add-on availability
++ Persist previous dyno states, last release, and config var hash in Heroku Postgres (`app_state`table) so alerts trigger reliably even after dyno restarts.
 
 ### 2.2 Slack Integration
 
@@ -72,7 +73,7 @@ Authorization: `HEROKU_API_KEY` environment variable
 
 + Tracks previous dyno states, last release version, config var hash
 + Compares current state to detect deltas
-+ Optional: persist config in JSON (workshop extension)
++ Database: Heroku Postgres used to persist app monitoring state. Table: app_state with columns: `app_name` (PK), `last_release`, `dynos` (JSONB), `config_vars_hash`, `updated_at`.
 
 ## 4️⃣ Web Dashboard Visual Design
 
@@ -94,6 +95,7 @@ Inline CSS or linked /static/css/dashboard.css for styling consistency.
 | `MONITORED_APP_NAME` | App name to monitor | 
 | `SLACK_CHANNEL` | Slack channel for alerts |
 | `CHECK_INTERVAL_MINUTES` | Polling interval (default: 5) |
+| `DATABASE_URL` | Heroku provides automatically when Postgres add-on is provisioned. |
 
 ### 5.2 Setting Config Vars
 #### Option 1: Using the Heroku Dashboard
@@ -149,17 +151,38 @@ cd heroku-monitoring-bot
 heroku create <lastname>-heroku-status
 ```
 
-### Step 3: Set config vars
+### Step 3: Provision a Heroku Postgress add-on:
+
+```bash
+heroku addons:create heroku-postgresql:essential-0 --app YOUR_APP_NAME
+```
+
+### Step 4: Create the `app_state` table
+
+```bash
+heroku pg:psql --app YOUR_APP_NAME
+CREATE TABLE app_state (
+    app_name TEXT PRIMARY KEY,
+    last_release TEXT,
+    dynos JSONB,
+    config_vars_hash BIGINT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+> Note that `DATABASE_URL` is automatically set by Heroku.
+
+### Step 5: Set config vars
 
 Using the Dashboard or CLI (see section 5.2)
 
-### Step 4: Deploy to Heroku
+### Step 6: Deploy to Heroku
 
 ```bash
 git push heroku main
 ```
 
-Step 5: Add the Slack Slash Command
+### Step 7: Add the Slack Slash Command
 
 + Go to your Slack App → Slash Commands
 + Create `/heroku-status`
@@ -181,6 +204,8 @@ Step 5: Add the Slack Slash Command
 + Connect it to Slack for real-time notifications
 + Use `/heroku-status` to inspect your Heroku app
 + Update monitoring configuration from the dashboard
++ Persist dynamic configuration and app state in Postgres.
++ Observe that Slack alerts are now sent when changes occur even after dyno restarts.
 
 ### Extension Ideas:
 
