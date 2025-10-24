@@ -3,7 +3,7 @@ import hashlib
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
@@ -118,7 +118,7 @@ def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
                 state.get('last_release'),
                 json.dumps(state.get('dynos', {})),  # ensure we always save JSON string
                 state.get('config_vars_hash'),
-                datetime.now(datetime.timezone.utc).isoformat()
+                datetime.now(timezone.utc).isoformat()
             ))
             conn.commit()
     finally:
@@ -324,7 +324,7 @@ def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> N
         created_at = latest.get('created_at', '')
         description = latest.get('description', 'No description')
 
-        noticed_at = datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        noticed_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
 
         send_slack_message(
             f"🚀 *New Deploy Detected at {noticed_at}* 🚀\n\n"
@@ -358,13 +358,13 @@ def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
     # Send Slack alert if config changed
     if last_hash and last_hash != config_hash:
         send_slack_message(
-            f"⚙️ *Config Vars Changed at {datetime.now(datetime.timezone.utc).isoformat()}* ⚙️\n"
+            f"⚙️ *Config Vars Changed at {datetime.now(timezone.utc).isoformat()}* ⚙️\n"
             f"App: `{app_name}`\nReview changes in Heroku dashboard."
         )
 
     # Update in-memory state
     state['config_vars_hash'] = config_hash
-    state['updated_at'] = datetime.now(datetime.timezone.utc).isoformat()
+    state['updated_at'] = datetime.now(timezone.utc).isoformat()
 
     # Persist state to DB
     try:
@@ -544,7 +544,7 @@ def api_status() -> Dict[str, Any]:
         'slack_channel': dynamic_config.get('slack_channel'),
         'check_interval': dynamic_config.get('check_interval'),
         'monitoring_active': bool(dynamic_config.get('monitored_app') and HEROKU_API_KEY and SLACK_BOT_TOKEN),
-        'timestamp': datetime.now(datetime.timezone.utc).isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     })
 
 @app.route('/health')
