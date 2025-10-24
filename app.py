@@ -340,6 +340,19 @@ def slack_command():
     if command == '/heroku-status':
         app_name = command_text.strip() or get_monitored_app()
 
+        if app_name.lower() == "help":
+        return jsonify({
+            'response_type': 'ephemeral',
+            'text': (
+                "🤠 *Heroku Monitoring Bot Help* 🤠\n\n"
+                "• `/heroku-status [app_name]` - Get current status of a monitored Heroku app\n"
+                "• Configure monitoring via the web dashboard at `/`\n"
+                "• Alerts are sent to your configured Slack channel when dynos crash, releases deploy, or config vars change\n"
+                "• Check interval can be adjusted in the dashboard (1-60 min)\n"
+                "• Static configuration (Heroku API key, Slack Bot Token) requires a redeploy to change\n"
+            )
+        })
+
         if not app_name:
             return jsonify({
                 'response_type': 'ephemeral',
@@ -410,6 +423,8 @@ def get_app_status(app_name):
         for release in recent_releases:
             version = release.get('version')
             description = release.get('description', 'No description')
+            if description.lower().startswith('deploy '):
+                description = f"Code push ({description.split(' ')[1]})"
             created = release.get('created_at', '')
             status += f"• v{version}: {description} ({created})\n"
         status += "\n"
