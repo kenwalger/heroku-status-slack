@@ -353,16 +353,38 @@ def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
     # Compute hash of current config
     config_json = json.dumps(config_vars, sort_keys=True)
     config_hash = int(hashlib.sha256(config_json.encode('utf-8')).hexdigest(), 16)
-
     last_hash = state.get('config_vars_hash')
 
+    # Send Slack alert if config changed
     if last_hash and last_hash != config_hash:
         send_slack_message(
-            f"⚙️ *Config Vars Changed* ⚙️\nApp: `{app_name}`\nReview changes in Heroku dashboard."
+            f"⚙️ *Config Vars Changed at {datetime.utcnow().isoformat()}* ⚙️\n"
+            f"App: `{app_name}`\nReview changes in Heroku dashboard."
         )
 
-    # Always update state
+    # Update in-memory state
     state['config_vars_hash'] = config_hash
+    state['updated_at'] = datetime.utcnow()
+
+    # Persist state to DB
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO app_state (app_name, config_vars_hash, updated_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (app_name) DO UPDATE
+                    SET config_vars_hash = EXCLUDED.config_vars_hash,
+                        updated_at = EXCLUDED.updated_at
+                """, (app_name, config_hash, state['updated_at']))
+        # conn automatically committed by 'with conn:'
+    except Exception as e:
+        # Log error but don’t crash scheduler
+        print(f"Error persisting config state for {app_name}: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def check_app_health(app_name: str) -> None:
     """
