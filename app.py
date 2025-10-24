@@ -17,12 +17,12 @@ app = Flask(__name__)
 # Static configuration from environment variables (cannot be changed via UI)
 HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY')
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
-CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL_MINUTES', '5'))
 
 # Dynamic configuration (can be changed via web UI)
 dynamic_config = {
     'monitored_app': os.environ.get('MONITORED_APP_NAME', ''),
-    'slack_channel': os.environ.get('SLACK_CHANNEL', '#alerts')
+    'slack_channel': os.environ.get('SLACK_CHANNEL', '#alerts'),
+    'check_interval': int(os.environ.get('CHECK_INTERVAL_MINUTES', '5'))
 }
 
 # Helper function to get current config values
@@ -31,6 +31,9 @@ def get_monitored_app():
 
 def get_slack_channel():
     return dynamic_config.get('slack_channel', '#alerts')
+
+def get_check_interval():
+    return dynamic_config.get('check_interval', 5)
 
 # Initialize Slack client
 slack_client = None
@@ -253,7 +256,7 @@ def index():
         'dashboard.html',
         current_app=get_monitored_app(),
         current_channel=get_slack_channel(),
-        check_interval=CHECK_INTERVAL,
+        check_interval=get_check_interval(),
         monitoring_active=bool(get_monitored_app() and HEROKU_API_KEY and SLACK_BOT_TOKEN),
         heroku_api_configured=bool(HEROKU_API_KEY),
         slack_configured=bool(SLACK_BOT_TOKEN)
@@ -265,19 +268,32 @@ def update_config():
     """Update monitoring configuration"""
     app_name = request.form.get('app_name', '').strip()
     slack_channel = request.form.get('slack_channel', '').strip()
+    check_interval_str = request.form.get('check_interval', '').strip()
 
-    if not app_name or not slack_channel:
-        return redirect(url_for('index') + '?error=Both fields are required')
+    if not app_name or not slack_channel or not check_interval_str:
+        return redirect(url_for('index') + '?error=All fields are required')
+
+    # Validate check interval
+    try:
+        check_interval = int(check_interval_str)
+        if check_interval < 1:
+            return redirect(url_for('index') + '?error=Check interval must be at least 1 minute')
+        if check_interval > 60:
+            return redirect(url_for('index') + '?error=Check interval cannot exceed 60 minutes')
+    except ValueError:
+        return redirect(url_for('index') + '?error=Check interval must be a valid number')
 
     # Update dynamic configuration
     old_app = get_monitored_app()
+    old_interval = get_check_interval()
     dynamic_config['monitored_app'] = app_name
     dynamic_config['slack_channel'] = slack_channel
+    dynamic_config['check_interval'] = check_interval
 
-    logger.info(f"Configuration updated: app={app_name}, channel={slack_channel}")
+    logger.info(f"Configuration updated: app={app_name}, channel={slack_channel}, interval={check_interval}")
 
-    # Update scheduler if the monitored app changed
-    if old_app != app_name:
+    # Update scheduler if the monitored app or interval changed
+    if old_app != app_name or old_interval != check_interval:
         restart_scheduler()
 
     return redirect(url_for('index') + '?success=true')
@@ -291,7 +307,7 @@ def api_status():
         'service': 'Heroku Monitoring Bot',
         'monitored_app': get_monitored_app(),
         'slack_channel': get_slack_channel(),
-        'check_interval': CHECK_INTERVAL,
+        'check_interval': get_check_interval(),
         'monitoring_active': bool(get_monitored_app() and HEROKU_API_KEY and SLACK_BOT_TOKEN),
         'timestamp': datetime.utcnow().isoformat()
     })
@@ -305,7 +321,7 @@ def health():
         'slack_configured': SLACK_BOT_TOKEN is not None,
         'monitored_app': get_monitored_app(),
         'slack_channel': get_slack_channel(),
-        'check_interval': CHECK_INTERVAL
+        'check_interval': get_check_interval()
     }
     return jsonify(config_status)
 
@@ -427,8 +443,9 @@ def restart_scheduler():
     global scheduler_initialized
 
     monitored_app = get_monitored_app()
+    check_interval = get_check_interval()
 
-    if not monitored_app or CHECK_INTERVAL <= 0:
+    if not monitored_app or check_interval <= 0:
         logger.info("Scheduler not started: no app configured or invalid interval")
         return
 
@@ -442,7 +459,7 @@ def restart_scheduler():
         scheduler.add_job(
             func=scheduled_health_check,
             trigger="interval",
-            minutes=CHECK_INTERVAL,
+            minutes=check_interval,
             id='health_check',
             name='Periodic health check',
             replace_existing=True
@@ -453,7 +470,7 @@ def restart_scheduler():
             scheduler.start()
             scheduler_initialized = True
 
-        logger.info(f"Scheduler updated: checking {monitored_app} every {CHECK_INTERVAL} minutes")
+        logger.info(f"Scheduler updated: checking {monitored_app} every {check_interval} minutes")
     except Exception as e:
         logger.error(f"Error restarting scheduler: {e}")
 
@@ -465,7 +482,8 @@ def initialize_scheduler():
 
     if not scheduler_initialized:
         monitored_app = get_monitored_app()
-        if monitored_app and CHECK_INTERVAL > 0:
+        check_interval = get_check_interval()
+        if monitored_app and check_interval > 0:
             restart_scheduler()
             scheduler_initialized = True
 
