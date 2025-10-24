@@ -329,7 +329,7 @@ def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> N
     release_version = latest.get('version')
     last_known = state.get('last_release')
 
-    if last_known and last_known != release_version:
+    if last_known is not None and last_known != release_version:
         user_email = latest.get('user', {}).get('email', 'Unknown')
         created_at = latest.get('created_at', '')
         description = latest.get('description', 'No description')
@@ -458,16 +458,17 @@ def scheduled_health_check() -> None:
     Runs `check_app_health` for the currently monitored app.
     """
     monitored_app = dynamic_config.get('monitored_app')
-    if monitored_app:
-        logger.info(f"Running scheduled check for: {monitored_app}")
-        check_app_health(monitored_app)
+    if not monitored_app:
+        return
+    
+    logger.info(f"Running scheduled check for: {monitored_app}")
+    check_app_health(monitored_app)
 
 def restart_scheduler() -> None:
     """
     Restart or initialize the scheduler with the current monitored app and interval.
     Removes existing job if present, updates interval, and starts scheduler if needed.
     """
-    global scheduler_initialized
     monitored_app = dynamic_config.get('monitored_app')
     interval = dynamic_config.get('check_interval', 5)
 
@@ -475,36 +476,34 @@ def restart_scheduler() -> None:
         logger.info("Scheduler not started: no app configured or invalid interval")
         return
 
-    try:
-        if scheduler.running and scheduler.get_job('health_check'):
-            scheduler.remove_job('health_check')
-        scheduler.add_job(
-            func=scheduled_health_check,
-            trigger="interval",
-            minutes=interval,
-            id='health_check',
-            name='Periodic health check',
-            replace_existing=True
-        )
-        if not scheduler.running:
-            scheduler.start()
-            scheduler_initialized = True
+    if scheduler.get_job('health_check'):
+        scheduler.remove_job('health_check')
 
+    scheduler.add_job(
+        func=scheduled_health_check,
+        trigger="interval",
+        minutes=interval,
+        id='health_check',
+        name='Periodic health check',
+        replace_existing=True
+    )
+
+    if not scheduler.running:
+        scheduler.start()
+        logger.info(f"Scheduler started: checking {monitored_app} every {interval} minutes")
+    else:
         logger.info(f"Scheduler updated: checking {monitored_app} every {interval} minutes")
-    except Exception as e:
-        logger.error(f"Error restarting scheduler: {e}")
 
 
 @app.before_request
 def initialize_scheduler():
+    """
+    Ensure the scheduler starts once per web dyno.
+    """
     global scheduler_initialized
     if not scheduler_initialized and dynamic_config.get('monitored_app'):
         restart_scheduler()
         scheduler_initialized = True
-
-if dynamic_config.get('monitored_app') and os.environ.get("DYNO", "").startswith("web.1"):
-    restart_scheduler()
-    scheduler_initialized = True
 
 # --------------------------
 # Flask routes
