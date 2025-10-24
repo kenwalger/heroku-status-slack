@@ -400,9 +400,14 @@ def get_app_status(app_name):
         status += "\n"
 
     # Recent releases
-    if releases:
+    releases = heroku_client.get_releases(app_name)
+    releases_sorted = sorted(releases, key=lambda r: r['version'], reverse=True)
+
+    recent_releases = releases_sorted[:3]
+
+    if recent_releases:
         status += f"*Recent Releases:*\n"
-        for release in releases[:3]:
+        for release in recent_releases:
             version = release.get('version')
             description = release.get('description', 'No description')
             created = release.get('created_at', '')
