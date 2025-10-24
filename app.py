@@ -84,6 +84,11 @@ def load_app_state(app_name:str) -> Dict[str, Any]:
                     state['dynos'] = {}
                 state['config_vars_hash'] = row['config_vars_hash']
                 state['updated_at'] = row['updated_at']
+            else:
+                state['config_vars_hash'] = None
+                state['dynos'] = {}
+                state['last_release'] = None
+                state['updated_at'] = None
     finally:
         conn.close()
 
@@ -350,10 +355,25 @@ def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
     Returns:
         None
     """
+    last_hash = None
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT config_vars_hash FROM app_state WHERE app_name = %s", (app_name,))
+            row = cur.fetchone()
+            last_hash = row['config_vars_hash'] if row else None
+    except Exception as e:
+        print(f"Error loading config state for {app_name}: {e}")
+        last_hash = state.get('config_vars_hash')
+    finally:
+        if conn:
+            conn.close()
+
+
     # Compute hash of current config
     config_json = json.dumps(config_vars, sort_keys=True)
     config_hash = hashlib.sha256(config_json.encode('utf-8')).hexdigest()
-    last_hash = state.get('config_vars_hash')
 
     # Send Slack alert if config changed
     if last_hash and last_hash != config_hash:
@@ -470,8 +490,8 @@ def restart_scheduler() -> None:
     except Exception as e:
         logger.error(f"Error restarting scheduler: {e}")
 
-@app.before_first_request
-def before_first_request():
+@app.before_serving
+def setup_monitoring():
     initialize_scheduler_once()
 
 @app.before_request
