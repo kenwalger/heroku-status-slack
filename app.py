@@ -761,21 +761,24 @@ if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
     logger.info("Starting scheduler on boot for primary dyno...")
     try:
         restart_scheduler()
+
+        # Assuming dynamic_config has the monitored app name(s)
+        heroku_api_key = os.environ.get("HEROKU_API_KEY")
+        heroku_db_url = os.environ.get("DATABASE_URL")
+
+        with psycopg2.connect(heroku_db_url) as db_conn:
+            for monitored_app in dynamic_config.get('monitored_apps', []):
+                try:
+                    current_version, release_time = get_current_release(monitored_app, heroku_api_key)
+                    update_db_last_release(db_conn, monitored_app, current_version, release_time)
+                    
+                    # Optional: Send Slack notification here
+                    send_slack_message(monitored_app, current_version, release_time)
+                except Exception as e:
+                    app.logger.error(f"Failed to update release info for {monitored_app}: {e}")
+
     except Exception as e:
         logger.error(f"Error starting scheduler on boot: {e}")
-
-# Assuming dynamic_config has the monitored app name(s)
-heroku_api_key = os.environ.get("HEROKU_API_KEY")
-
-for monitored_app in dynamic_config.get('monitored_apps', []):
-    try:
-        current_version, release_time = get_current_release(monitored_app, heroku_api_key)
-        update_db_last_release(db_conn, monitored_app, current_version, release_time)
-        
-        # Optional: Send Slack notification here
-        send_slack_message(monitored_app, current_version, release_time)
-    except Exception as e:
-        app.logger.error(f"Failed to update release info for {monitored_app}: {e}")
 
 
 # --------------------------
