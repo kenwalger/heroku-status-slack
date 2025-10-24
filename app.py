@@ -421,6 +421,13 @@ def check_app_health(app_name: str) -> None:
 scheduler = BackgroundScheduler()
 scheduler_initialized = False
 
+def initialize_scheduler_once():
+    global scheduler_initialized
+    # Only start scheduler in the first web dyno
+    if not scheduler_initialized and os.environ.get("DYNO", "").startswith("web.1"):
+        restart_scheduler()
+        scheduler_initialized = True
+
 def scheduled_health_check() -> None:
     """
     Scheduled job function for the APScheduler.
@@ -462,6 +469,10 @@ def restart_scheduler() -> None:
         logger.info(f"Scheduler updated: checking {monitored_app} every {interval} minutes")
     except Exception as e:
         logger.error(f"Error restarting scheduler: {e}")
+
+@app.before_first_request
+def before_first_request():
+    initialize_scheduler_once()
 
 @app.before_request
 def initialize_scheduler():
