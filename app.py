@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+
 # Static configuration from environment variables
 HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY')
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
@@ -30,6 +31,14 @@ dynamic_config = {
     'slack_channel': os.environ.get('SLACK_CHANNEL', '#alerts'),
     'check_interval': int(os.environ.get('CHECK_INTERVAL_MINUTES', '5'))
 }
+
+# Scheduler globals
+scheduler = BackgroundScheduler()
+scheduler_initialized = False
+
+if dynamic_config.get('monitored_app') and os.environ.get("DYNO", "").startswith("web.1"):
+    restart_scheduler()
+    scheduler_initialized = True
 
 # Initialize Slack client
 slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
@@ -438,8 +447,7 @@ def check_app_health(app_name: str) -> None:
 # --------------------------
 # Scheduler
 # --------------------------
-scheduler = BackgroundScheduler()
-scheduler_initialized = False
+
 
 def initialize_scheduler_once():
     global scheduler_initialized
@@ -490,9 +498,6 @@ def restart_scheduler() -> None:
     except Exception as e:
         logger.error(f"Error restarting scheduler: {e}")
 
-@app.before_serving
-def setup_monitoring():
-    initialize_scheduler_once()
 
 @app.before_request
 def initialize_scheduler():
@@ -501,9 +506,6 @@ def initialize_scheduler():
         restart_scheduler()
         scheduler_initialized = True
 
-if dynamic_config.get('monitored_app'):
-    restart_scheduler()
-    scheduler_initialized = True
 
 # --------------------------
 # Flask routes
