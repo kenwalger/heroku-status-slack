@@ -340,17 +340,17 @@ def slack_command():
     if command == '/heroku-status':
 
         if command_text.lower() == "help":
-        return jsonify({
-            'response_type': 'ephemeral',
-            'text': (
-                "🤠 *Heroku Monitoring Bot Help* 🤠\n\n"
-                "• `/heroku-status [app_name]` - Get current status of a monitored Heroku app\n"
-                "• Configure monitoring via the web dashboard at `/`\n"
-                "• Alerts are sent to your configured Slack channel when dynos crash, releases deploy, or config vars change\n"
-                "• Check interval can be adjusted in the dashboard (1-60 min)\n"
-                "• Static configuration (Heroku API key, Slack Bot Token) requires a redeploy to change\n"
-            )
-        })
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': (
+                    "🤠 *Heroku Monitoring Bot Help* 🤠\n\n"
+                    "• `/heroku-status [app_name]` - Get current status of a monitored Heroku app\n"
+                    "• Configure monitoring via the web dashboard at `/`\n"
+                    "• Alerts are sent to your configured Slack channel when dynos crash, releases deploy, or config vars change\n"
+                    "• Check interval can be adjusted in the dashboard (1-60 min)\n"
+                    "• Static configuration (Heroku API key, Slack Bot Token) requires a redeploy to change\n"
+                )
+            })
 
         app_name = command_text.strip() or get_monitored_app()
 
