@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 from slack_sdk import WebClient
@@ -14,12 +14,23 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configuration from environment variables
+# Static configuration from environment variables (cannot be changed via UI)
 HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY')
-MONITORED_APP = os.environ.get('MONITORED_APP_NAME', '')
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
-SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL', '#alerts')
 CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL_MINUTES', '5'))
+
+# Dynamic configuration (can be changed via web UI)
+dynamic_config = {
+    'monitored_app': os.environ.get('MONITORED_APP_NAME', ''),
+    'slack_channel': os.environ.get('SLACK_CHANNEL', '#alerts')
+}
+
+# Helper function to get current config values
+def get_monitored_app():
+    return dynamic_config.get('monitored_app', '')
+
+def get_slack_channel():
+    return dynamic_config.get('slack_channel', '#alerts')
 
 # Initialize Slack client
 slack_client = None
@@ -95,11 +106,11 @@ def send_slack_message(text, blocks=None, channel=None):
 
     try:
         response = slack_client.chat_postMessage(
-            channel=channel or SLACK_CHANNEL,
+            channel=channel or get_slack_channel(),
             text=text,
             blocks=blocks
         )
-        logger.info(f"Slack message sent: {text[:50]}...")
+        logger.info(f"Slack message sent to {channel or get_slack_channel()}: {text[:50]}...")
     except SlackApiError as e:
         logger.error(f"Failed to send Slack message: {e}")
 
@@ -237,11 +248,51 @@ def check_config_changes(app_name, config_vars):
 
 @app.route('/')
 def index():
-    """Health check endpoint"""
+    """Main dashboard page"""
+    return render_template(
+        'dashboard.html',
+        current_app=get_monitored_app(),
+        current_channel=get_slack_channel(),
+        check_interval=CHECK_INTERVAL,
+        monitoring_active=bool(get_monitored_app() and HEROKU_API_KEY and SLACK_BOT_TOKEN),
+        heroku_api_configured=bool(HEROKU_API_KEY),
+        slack_configured=bool(SLACK_BOT_TOKEN)
+    )
+
+
+@app.route('/update-config', methods=['POST'])
+def update_config():
+    """Update monitoring configuration"""
+    app_name = request.form.get('app_name', '').strip()
+    slack_channel = request.form.get('slack_channel', '').strip()
+
+    if not app_name or not slack_channel:
+        return redirect(url_for('index') + '?error=Both fields are required')
+
+    # Update dynamic configuration
+    old_app = get_monitored_app()
+    dynamic_config['monitored_app'] = app_name
+    dynamic_config['slack_channel'] = slack_channel
+
+    logger.info(f"Configuration updated: app={app_name}, channel={slack_channel}")
+
+    # Update scheduler if the monitored app changed
+    if old_app != app_name:
+        restart_scheduler()
+
+    return redirect(url_for('index') + '?success=true')
+
+
+@app.route('/api/status')
+def api_status():
+    """JSON API endpoint for current status"""
     return jsonify({
         'status': 'ok',
         'service': 'Heroku Monitoring Bot',
-        'monitored_app': MONITORED_APP,
+        'monitored_app': get_monitored_app(),
+        'slack_channel': get_slack_channel(),
+        'check_interval': CHECK_INTERVAL,
+        'monitoring_active': bool(get_monitored_app() and HEROKU_API_KEY and SLACK_BOT_TOKEN),
         'timestamp': datetime.utcnow().isoformat()
     })
 
@@ -252,7 +303,8 @@ def health():
     config_status = {
         'heroku_api_configured': HEROKU_API_KEY is not None,
         'slack_configured': SLACK_BOT_TOKEN is not None,
-        'monitored_app': MONITORED_APP,
+        'monitored_app': get_monitored_app(),
+        'slack_channel': get_slack_channel(),
         'check_interval': CHECK_INTERVAL
     }
     return jsonify(config_status)
@@ -270,12 +322,12 @@ def slack_command():
 
     # Handle /heroku-status command
     if command == '/heroku-status':
-        app_name = command_text.strip() or MONITORED_APP
+        app_name = command_text.strip() or get_monitored_app()
 
         if not app_name:
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': '❌ Please specify an app name or configure MONITORED_APP_NAME'
+                'text': '❌ Please specify an app name or configure monitoring via the web UI'
             })
 
         status_info = get_app_status(app_name)
@@ -357,30 +409,65 @@ def get_app_status(app_name):
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
+scheduler_initialized = False
+
 
 def scheduled_health_check():
     """Scheduled health check job"""
-    if MONITORED_APP:
-        check_app_health(MONITORED_APP)
+    monitored_app = get_monitored_app()
+    if monitored_app:
+        logger.info(f"Running scheduled check for: {monitored_app}")
+        check_app_health(monitored_app)
     else:
         logger.warning("No monitored app configured")
+
+
+def restart_scheduler():
+    """Restart the scheduler with updated configuration"""
+    global scheduler_initialized
+
+    monitored_app = get_monitored_app()
+
+    if not monitored_app or CHECK_INTERVAL <= 0:
+        logger.info("Scheduler not started: no app configured or invalid interval")
+        return
+
+    try:
+        # Remove existing job if it exists
+        if scheduler.running and scheduler.get_job('health_check'):
+            scheduler.remove_job('health_check')
+            logger.info("Removed existing scheduler job")
+
+        # Add new job with updated config
+        scheduler.add_job(
+            func=scheduled_health_check,
+            trigger="interval",
+            minutes=CHECK_INTERVAL,
+            id='health_check',
+            name='Periodic health check',
+            replace_existing=True
+        )
+
+        # Start scheduler if not already running
+        if not scheduler.running:
+            scheduler.start()
+            scheduler_initialized = True
+
+        logger.info(f"Scheduler updated: checking {monitored_app} every {CHECK_INTERVAL} minutes")
+    except Exception as e:
+        logger.error(f"Error restarting scheduler: {e}")
 
 
 @app.before_request
 def initialize_scheduler():
     """Initialize the scheduler on first request"""
-    if not scheduler.running:
-        if MONITORED_APP and CHECK_INTERVAL > 0:
-            scheduler.add_job(
-                func=scheduled_health_check,
-                trigger="interval",
-                minutes=CHECK_INTERVAL,
-                id='health_check',
-                name='Periodic health check',
-                replace_existing=True
-            )
-            scheduler.start()
-            logger.info(f"Scheduler started: checking {MONITORED_APP} every {CHECK_INTERVAL} minutes")
+    global scheduler_initialized
+
+    if not scheduler_initialized:
+        monitored_app = get_monitored_app()
+        if monitored_app and CHECK_INTERVAL > 0:
+            restart_scheduler()
+            scheduler_initialized = True
 
 
 if __name__ == '__main__':
