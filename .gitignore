@@ -305,3 +305,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Commit Messages
+commit-message.txt

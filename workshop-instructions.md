@@ -78,7 +78,28 @@ heroku config:set CHECK_INTERVAL_MINUTES=5
 
 > Tip: Config vars replace .env — no local .env file needed.
 
-## Step 4: Deploy to Heroku
+## Step 4: Add Postgress Database
+
+```bash
+heroku addons:create heroku-postgresl:essential-0 --app <your_app_name>
+```
+
+> Note: This will automatically create a `DATABASE_URL` config variable for your application.
+
+## Step 5: Create the `app_state` Table
+
+```bash
+heroku pg:psql --app <your-app-name>
+CREATE TABLE app_state (
+    app_name TEXT PRIMARY KEY,
+    last_release TEXT,
+    dynos JSONB,
+    config_vars_hash BIGINT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## Step 6: Deploy to Heroku
 
 ```bash
 git push heroku main
@@ -86,7 +107,7 @@ git push heroku main
 
 Heroku will build and start your Flask app automatically.
 
-## Step 5: Configure Slack Slash Command
+## Step 7: Configure Slack Slash Command
 
 1. Go to your Slack workspace **→ Apps → Manage → Create App**
 2. Add a **Slash Command**:
@@ -94,7 +115,7 @@ Heroku will build and start your Flask app automatically.
   + Request URL: `https://<your-heroku-app>.herokuapp.com/slack/command`
 3. Install the Slack app to your workspace and note the **Bot Token**.
 
-## Step 6: Verify Setup
+## Step 8: Verify Setup
 
 Try Slack:
 

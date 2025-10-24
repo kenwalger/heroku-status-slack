@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from typing import Dict, Optional, Any, List
 import psycopg2
 
 # Configure logging
@@ -34,46 +35,93 @@ slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
 # --------------------------
 # Database helpers
 # --------------------------
-def get_db_connection():
+def get_db_connection() -> psycopg2.extensions.connection:
+    """
+    Create and return a new database connection to the configured Postgres database.
+
+    Returns:
+        psycopg2.extensions.connection: Active database connection.
+    """
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
-def load_app_state(app_name):
-    """Load persisted app state from Postgres"""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT last_release, dynos, config_vars_hash FROM app_state WHERE app_name = %s",
-                (app_name,)
-            )
+def load_app_state(app_name:str) -> Dict[str, Any]:
+    """
+    Load the persisted monitoring state for a given Heroku app.
+
+    Args:
+        app_name (str): Name of the Heroku app.
+
+    Returns:
+        Dict[str, Any]: Dictionary containing:
+            - 'last_release': str | None
+            - 'dynos': dict[str, str]  # dyno name -> state
+            - 'config_vars_hash': int | None
+            - 'updated_at': datetime | None
+    """
+    state = {
+        'last_release': None,
+        'dynos': {},
+        'config_vars_hash': None,
+        'updated_at': None
+    }
+
+    conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT * FROM app_state WHERE app_name = %s", (app_name,))
             row = cur.fetchone()
             if row:
-                last_release, dynos_json, config_vars_hash = row
-                return {
-                    'last_release': last_release,
-                    'dynos': json.loads(dynos_json) if isinstance(dynos_json, str) else (dynos_json or {}),
-                    'config_vars_hash': config_vars_hash
-                }
-            return {'last_release': None, 'dynos': {}, 'config_vars_hash': None}
+                state['last_release'] = row['last_release']
+                # dynos stored as JSONB in Postgres; if already a dict, just use it
+                dynos = row['dynos']
+                if isinstance(dynos, str):
+                    state['dynos'] = json.loads(dynos)
+                elif isinstance(dynos, dict):
+                    state['dynos'] = dynos
+                else:
+                    state['dynos'] = {}
+                state['config_vars_hash'] = row['config_vars_hash']
+                state['updated_at'] = row['updated_at']
+    finally:
+        conn.close()
 
-def save_app_state(app_name, state):
-    """Persist app state to Postgres"""
-    with get_db_connection() as conn:
+    return state
+
+
+def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
+    """
+    Persist monitoring state for a Heroku app to Postgres.
+
+    Args:
+        app_name (str): Name of the app.
+        state (Dict[str, Any]): State dict to persist. Expected keys:
+            'last_release', 'dynos', 'config_vars_hash', 'updated_at'.
+
+    Returns:
+        None
+    """
+    conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
+    try:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO app_state (app_name, last_release, dynos, config_vars_hash, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (app_name)
-                DO UPDATE SET last_release = EXCLUDED.last_release,
-                              dynos = EXCLUDED.dynos,
-                              config_vars_hash = EXCLUDED.config_vars_hash,
-                              updated_at = EXCLUDED.updated_at
+                VALUES (%s, %s, %s::jsonb, %s, %s)
+                ON CONFLICT (app_name) DO UPDATE
+                SET last_release = EXCLUDED.last_release,
+                    dynos = EXCLUDED.dynos,
+                    config_vars_hash = EXCLUDED.config_vars_hash,
+                    updated_at = EXCLUDED.updated_at
             """, (
                 app_name,
-                state['last_release'],
-                json.dumps(state['dynos']),
-                state['config_vars_hash'],
+                state.get('last_release'),
+                json.dumps(state.get('dynos', {})),  # ensure we always save JSON string
+                state.get('config_vars_hash'),
                 datetime.utcnow()
             ))
+            conn.commit()
+    finally:
+        conn.close()
+
 
 # --------------------------
 # Heroku API Client
@@ -89,7 +137,18 @@ class HerokuAPIClient:
             'Content-Type': 'application/json'
         }
 
-    def _request(self, method, endpoint, **kwargs):
+    def _request(self, method: str, endpoint: str, **kwargs) -> Optional[dict]:
+        """
+        Make a request to the Heroku API.
+
+        Args:
+            method (str): HTTP method, e.g., 'GET', 'POST'.
+            endpoint (str): API endpoint path.
+            **kwargs: Additional arguments for requests.request.
+
+        Returns:
+            Optional[dict]: Parsed JSON response or None on failure.
+        """
         url = f"{self.BASE_URL}{endpoint}"
         try:
             response = requests.request(method, url, headers=self.headers, **kwargs)
@@ -99,22 +158,77 @@ class HerokuAPIClient:
             logger.error(f"Heroku API request failed: {e}")
             return None
 
-    def get_app_info(self, app_name):
+    def get_app_info(self, app_name: str) -> Optional[dict]:
+        """
+        Get general information for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+
+        Returns:
+            Optional[dict]: App info dictionary or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}')
 
-    def get_dynos(self, app_name):
+    def get_dynos(self, app_name: str) -> Optional[list[dict]]:
+        """
+        Get the dyno states for a Heroku app.
+
+        Args:
+            app_name (str): The Heroku app name.
+
+        Returns:
+            Optional[list[dict]]: List of dyno info dictionaries or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}/dynos')
 
-    def get_releases(self, app_name, limit=5):
+    def get_releases(self, app_name: str, limit: int = 5) -> Optional[list[dict]]:
+        """
+        Get recent releases for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+            limit (int): Maximum number of releases to fetch.
+
+        Returns:
+            Optional[list[dict]]: List of release dictionaries or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}/releases?order=desc', params={'limit': limit})
 
-    def get_addons(self, app_name):
+    def get_addons(self, app_name: str) -> Optional[list[dict]]:
+        """
+        Get installed add-ons for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+
+        Returns:
+            Optional[list[dict]]: List of add-on dictionaries or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}/addons')
 
-    def get_config_vars(self, app_name):
+    def get_config_vars(self, app_name: str) -> Optional[dict]:
+        """
+        Get configuration variables for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+
+        Returns:
+            Optional[dict]: Dictionary of config vars or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}/config-vars')
 
-    def get_formation(self, app_name):
+    def get_formation(self, app_name: str) -> Optional[list[dict]]:
+        """
+        Get the dyno formation (type/size/quantity) for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+
+        Returns:
+            Optional[list[dict]]: List of formation dictionaries or None if request fails.
+        """
         return self._request('GET', f'/apps/{app_name}/formation')
 
 
@@ -124,7 +238,22 @@ heroku_client = HerokuAPIClient(HEROKU_API_KEY) if HEROKU_API_KEY else None
 # --------------------------
 # Slack messaging
 # --------------------------
-def send_slack_message(text, blocks=None, channel=None):
+def send_slack_message(text: str, 
+                       blocks: Optional[List[Dict[str, Any]]] = None, 
+                       channel: Optional[str]=None
+                       ) -> None:
+    
+    """
+    Send a message to a Slack channel using the Slack WebClient.
+
+    Args:
+        text (str): The message text to send.
+        blocks (Optional[List[Dict[str, Any]]]): Optional Slack block kit payload.
+        channel (Optional[str]): Slack channel ID or name. Defaults to configured channel.
+
+    Returns:
+        None
+    """
     if not slack_client:
         logger.warning("Slack client not configured, skipping message")
         return
@@ -142,44 +271,53 @@ def send_slack_message(text, blocks=None, channel=None):
 # --------------------------
 # Health checks
 # --------------------------
-def check_dyno_health(app_name, dynos, state):
-    """Check dyno states and alert on issues"""
-    crashed, down = [], []
+def check_dyno_health(app_name: str, dynos: list[dict], state: dict) -> None:
+    """
+    Compare current dynos to previous state and send Slack alerts for crashes or downtime.
 
-    prev_dynos = state.get('dynos', {})
+    Args:
+        app_name (str): Heroku app name.
+        dynos (list[dict]): Current dyno info from Heroku API.
+        state (dict): Monitoring state dict; will be updated in-place.
+
+    Returns:
+        None
+    """
+    last_dynos = state.get('dynos', {})
 
     for dyno in dynos:
-        dyno_id = dyno.get('id')
-        dyno_name = dyno.get('name', dyno_id)
-        dyno_type = dyno.get('type', 'unknown')
-        dyno_state = dyno.get('state', 'unknown')
+        name = dyno.get('name')
+        status = dyno.get('state')
 
-        # Compare with previous state
-        prev_state = prev_dynos.get(dyno_id, {}).get('state')
-        if prev_state != dyno_state:
-            if dyno_state == 'crashed':
-                crashed.append(f"{dyno_name} ({dyno_type})")
-            elif dyno_state == 'down':
-                down.append(f"{dyno_name} ({dyno_type})")
+        if last_dynos.get(name) and last_dynos[name] != status:
+            if status.lower() == 'crashed':
+                send_slack_message(f"🚨 *Dyno Crash Detected* 🚨\nApp: `{app_name}`\n• {name} ({dyno.get('type')})")
+            elif status.lower() == 'down':
+                send_slack_message(f"⚠️ *Dynos Down* ⚠️\nApp: `{app_name}`\n• {name} ({dyno.get('type')})")
 
-        # Update current state
-        prev_dynos[dyno_id] = {'name': dyno_name, 'type': dyno_type, 'state': dyno_state}
+    # Update state for next check
+    state['dynos'] = {d['name']: d['state'] for d in dynos}
 
-    if crashed:
-        send_slack_message(f"🚨 *ALERT: Dyno Crash Detected* 🚨\n\nApp: `{app_name}`\nCrashed dynos:\n• " + '\n• '.join(crashed))
-    if down:
-        send_slack_message(f"⚠️ *WARNING: Dynos Down* ⚠️\n\nApp: `{app_name}`\nDown dynos:\n• " + '\n• '.join(down))
+def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> None:
+    """
+    Check for new releases and send Slack alerts if a new deploy is detected.
 
-    state['dynos'] = prev_dynos
+    Args:
+        app_name (str): Heroku app name.
+        releases (list[dict]): List of recent release dictionaries.
+        state (dict): Monitoring state dict; will be updated in-place.
 
-def check_recent_releases(app_name, releases, state):
+    Returns:
+        None
+    """
     if not releases:
         return
 
     latest = releases[0]
     release_version = latest.get('version')
+    last_known = state.get('last_release')
 
-    if state.get('last_release') and state['last_release'] != release_version:
+    if last_known and last_known != release_version:
         user_email = latest.get('user', {}).get('email', 'Unknown')
         created_at = latest.get('created_at', '')
         description = latest.get('description', 'No description')
@@ -196,23 +334,47 @@ def check_recent_releases(app_name, releases, state):
 
     state['last_release'] = release_version
 
-def check_config_changes(app_name, config_vars, state):
-    config_hash = hash(frozenset(config_vars.keys()))
-    if state.get('config_vars_hash') and state['config_vars_hash'] != config_hash:
+def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
+    """
+    Detect changes to config vars and send Slack alerts.
+
+    Args:
+        app_name (str): Heroku app name.
+        config_vars (dict): Current config vars.
+        state (dict): Monitoring state dict; will be updated in-place.
+
+    Returns:
+        None
+    """
+    # Compute hash of current config
+    config_json = json.dumps(config_vars, sort_keys=True)
+    config_hash = int(hashlib.sha256(config_json.encode('utf-8')).hexdigest(), 16)
+
+    last_hash = state.get('config_vars_hash')
+
+    if last_hash and last_hash != config_hash:
         send_slack_message(
-            f"⚙️ *Config Vars Changed* ⚙️\n\n"
-            f"App: `{app_name}`\n"
-            f"Config variables have been modified.\n"
-            "_Review changes in the Heroku dashboard._"
+            f"⚙️ *Config Vars Changed* ⚙️\nApp: `{app_name}`\nReview changes in Heroku dashboard."
         )
+
+    # Always update state
     state['config_vars_hash'] = config_hash
 
-def check_app_health(app_name):
+def check_app_health(app_name: str) -> None:
+    """
+    Orchestrate the health check: dynos, releases, and config vars.
+
+    Args:
+        app_name (str): Heroku app name.
+
+    Returns:
+        None
+    """
     if not heroku_client:
         logger.warning("Heroku client not configured")
         return
 
-    state = load_app_state(app_name)
+    state = load_app_state(app_name) or {}
 
     dynos = heroku_client.get_dynos(app_name)
     releases = heroku_client.get_releases(app_name, limit=3)
@@ -233,13 +395,21 @@ def check_app_health(app_name):
 scheduler = BackgroundScheduler()
 scheduler_initialized = False
 
-def scheduled_health_check():
+def scheduled_health_check() -> None:
+    """
+    Scheduled job function for the APScheduler.
+    Runs `check_app_health` for the currently monitored app.
+    """
     monitored_app = dynamic_config.get('monitored_app')
     if monitored_app:
         logger.info(f"Running scheduled check for: {monitored_app}")
         check_app_health(monitored_app)
 
-def restart_scheduler():
+def restart_scheduler() -> None:
+    """
+    Restart or initialize the scheduler with the current monitored app and interval.
+    Removes existing job if present, updates interval, and starts scheduler if needed.
+    """
     global scheduler_initialized
     monitored_app = dynamic_config.get('monitored_app')
     interval = dynamic_config.get('check_interval', 5)
@@ -278,7 +448,13 @@ def initialize_scheduler():
 # Flask routes
 # --------------------------
 @app.route('/')
-def index():
+def index() -> str:
+    """
+    Render the dashboard page with current dynamic configuration.
+
+    Returns:
+        str: Rendered HTML template.
+    """
     return render_template(
         'dashboard.html',
         current_app=dynamic_config.get('monitored_app', ''),
@@ -290,7 +466,13 @@ def index():
     )
 
 @app.route('/update-config', methods=['POST'])
-def update_config():
+def update_config() -> Any:
+    """
+    Update the dynamic monitoring configuration from the web dashboard.
+
+    Returns:
+        Flask redirect response back to the dashboard with optional query parameters.
+    """
     app_name = request.form.get('app_name', '').strip()
     slack_channel = request.form.get('slack_channel', '').strip()
     check_interval_str = request.form.get('check_interval', '').strip()
@@ -318,7 +500,13 @@ def update_config():
     return redirect(url_for('index') + '?success=true')
 
 @app.route('/api/status')
-def api_status():
+def api_status() -> Dict[str, Any]:
+    """
+    Return JSON with current service and monitoring configuration.
+
+    Returns:
+        Dict[str, Any]: Status payload.
+    """
     return jsonify({
         'status': 'ok',
         'service': 'Heroku Monitoring Bot',
@@ -330,7 +518,13 @@ def api_status():
     })
 
 @app.route('/health')
-def health():
+def health() -> Dict[str, Any]:
+    """
+    Return JSON with system and monitoring health info.
+
+    Returns:
+        Dict[str, Any]: Health payload.
+    """
     return jsonify({
         'heroku_api_configured': HEROKU_API_KEY is not None,
         'slack_configured': SLACK_BOT_TOKEN is not None,
@@ -340,10 +534,16 @@ def health():
     })
 
 @app.route('/slack/command', methods=['POST'])
-def slack_command():
+def slack_command() -> Any:
+    """
+    Handle the /heroku-status Slack slash command.
+
+    Returns:
+        Flask Response: JSON response to Slack (ephemeral or in_channel).
+    """
     command_text = request.form.get('text', '')
     command = request.form.get('command', '')
-    response_url = request.form.get('response_url')
+    response_url = request.form.get('response_url')d
 
     if command != '/heroku-status':
         return jsonify({'response_type': 'ephemeral', 'text': f'Unknown command: {command}'})
@@ -367,7 +567,17 @@ def slack_command():
     threading.Thread(target=fetch_and_post_status, args=(app_name, response_url)).start()
     return jsonify({'response_type': 'ephemeral', 'text': f"⏳ Fetching status for `{app_name}`..."})
 
-def fetch_and_post_status(app_name, response_url):
+def fetch_and_post_status(app_name: str, response_url: str) -> None:
+    """
+    Fetch the current status of a Heroku app and post it back to Slack.
+
+    Args:
+        app_name (str): The Heroku app to fetch status for.
+        response_url (str): Slack response URL provided in the slash command payload.
+
+    Returns:
+        None
+    """
     try:
         status_info = get_app_status(app_name)
         requests.post(response_url, json={'response_type': 'in_channel', 'text': status_info})
@@ -375,7 +585,16 @@ def fetch_and_post_status(app_name, response_url):
         logger.error(f"Failed to post status for {app_name}: {e}")
         requests.post(response_url, json={'response_type': 'ephemeral', 'text': f"❌ Failed: {e}"})
 
-def get_app_status(app_name):
+def get_app_status(app_name: str) -> str:
+    """
+    Build a detailed textual status of a Heroku app, including dynos, releases, formation, and add-ons.
+
+    Args:
+        app_name (str): The Heroku app to inspect.
+
+    Returns:
+        str: A formatted string suitable for Slack messages.
+    """
     if not heroku_client:
         return "❌ Heroku API not configured"
 
@@ -415,7 +634,16 @@ def get_app_status(app_name):
 
     return status
 
-def format_dyno_status(dynos):
+def format_dyno_status(dynos: Optional[list[dict]]) -> str:
+    """
+    Summarize dyno states grouped by type.
+
+    Args:
+        dynos (Optional[list[dict]]): List of dyno dictionaries from Heroku API.
+
+    Returns:
+        str: Human-readable summary of dyno states.
+    """    
     if not dynos:
         return "No dynos running"
 
