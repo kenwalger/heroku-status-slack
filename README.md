@@ -283,7 +283,7 @@ Found a bug or have a feature request? Feel free to open an issue or submit a pu
 
 ## License
 
-MIT License - feel free to use this for your own projects!
+Apache License 2.0 - feel free to use this for your own projects!
 
 ## Resources
 
