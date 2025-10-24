@@ -543,7 +543,7 @@ def slack_command() -> Any:
     """
     command_text = request.form.get('text', '')
     command = request.form.get('command', '')
-    response_url = request.form.get('response_url')d
+    response_url = request.form.get('response_url')
 
     if command != '/heroku-status':
         return jsonify({'response_type': 'ephemeral', 'text': f'Unknown command: {command}'})
