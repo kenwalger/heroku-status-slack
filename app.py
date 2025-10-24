@@ -36,10 +36,6 @@ dynamic_config = {
 scheduler = BackgroundScheduler()
 scheduler_initialized = False
 
-if dynamic_config.get('monitored_app') and os.environ.get("DYNO", "").startswith("web.1"):
-    restart_scheduler()
-    scheduler_initialized = True
-
 # Initialize Slack client
 slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
 
@@ -506,6 +502,9 @@ def initialize_scheduler():
         restart_scheduler()
         scheduler_initialized = True
 
+if dynamic_config.get('monitored_app') and os.environ.get("DYNO", "").startswith("web.1"):
+    restart_scheduler()
+    scheduler_initialized = True
 
 # --------------------------
 # Flask routes
