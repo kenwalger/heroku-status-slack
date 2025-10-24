@@ -1,36 +1,80 @@
+/* Body and general text */
 body {
     font-family: Georgia, serif;
-    margin: 20px;
-    color: #2f1d1a;
     background-color: #fff7d4;
+    color: #2f1d1a;
+    margin: 20px;
 }
 
 h1 {
-    font-size: 30px;
+    font-size: 32px;
     text-align: center;
-    color: #ffffff;
-    text-shadow: 3px 3px 6px rgba(254, 254, 254, 0.0039);
+    color: #593b32;
+    text-shadow: 2px 2px 3px #fff7d4;
+}
+
+.tagline {
+    text-align: center;
+    font-size: 14px;
+    color: #4a312a;
+    margin-bottom: 25px;
+}
+
+/* Section styling */
+section {
+    margin-bottom: 30px;
+    padding: 15px;
+    border: 2px solid #593b32;
+    border-radius: 10px;
+    background-color: #fefcf8;
 }
 
 h2 {
-    font-size: 18px;
-    margin-top: 30px;
-    color: #2f1d1a;
+    font-size: 20px;
+    color: #4a312a;
+    border-bottom: 1px solid #593b32;
+    padding-bottom: 5px;
+    margin-bottom: 15px;
 }
 
+/* Status items */
+.status-item {
+    margin-bottom: 12px;
+}
+
+.status-item h3 {
+    font-size: 12px;
+    margin: 0;
+    color: #4a312a;
+}
+
+.status-item p {
+    font-size: 14px;
+    margin: 2px 0 8px 0;
+}
+
+/* Form styling */
 label {
     display: block;
-    margin-top: 15px;
+    margin-top: 12px;
     font-weight: bold;
 }
 
-input {
+input[type="text"],
+input[type="number"] {
     width: 50%;
     padding: 6px;
     margin-top: 5px;
+    margin-bottom: 5px;
+    border: 2px solid #593b32;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+small {
+    display: block;
     margin-bottom: 10px;
-    border: 1px solid #593b32;
-    border-radius: 4px;
+    color: #593b32;
 }
 
 button {
@@ -38,7 +82,7 @@ button {
     color: #fff7d4;
     padding: 8px 12px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
     margin-top: 10px;
 }
@@ -47,10 +91,14 @@ button:hover {
     background-color: #4a312a;
 }
 
-p {
-    margin: 5px 0;
+/* Tips */
+.tip {
+    color: #593b32;
+    font-style: italic;
+    margin-top: 10px;
 }
 
-b {
-    font-weight: bold;
+/* Static configuration */
+.static-config p {
+    font-size: 14px;
 }

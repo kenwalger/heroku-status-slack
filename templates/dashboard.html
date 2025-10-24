@@ -3,37 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <title>Heroku Monitoring Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
+    <h1>🤠 <b>Heroku Monitoring Dashboard</b></h1>
+    <p class="tagline">Wrangle your apps and keep 'em running smooth on the digital frontier</p>
 
-<h1>🤠 Heroku Monitoring Dashboard</h1>
-<p>Wrangle your apps and keep 'em running smooth on the digital frontier</p>
+    <section class="status">
+        <h2>Current Status</h2>
+        <div class="status-item">
+            <h3>MONITORED APP</h3>
+            <p><b>{{ current_app or 'Not Set' }}</b></p>
+        </div>
+        <div class="status-item">
+            <h3>ALERT CHANNEL</h3>
+            <p><b>{{ current_channel or 'Not Set' }}</b></p>
+        </div>
+        <div class="status-item">
+            <h3>CHECK INTERVAL</h3>
+            <p><b>{{ check_interval }} min</b></p>
+        </div>
+        <div class="status-item">
+            <h3>STATUS</h3>
+            <p><b>{{ 'ACTIVE' if MONITORING_ACTIVE else 'INACTIVE' }}</b></p>
+        </div>
+    </section>
 
-<h2>Current Status</h2>
-<p><b>Monitored App:</b> {{ current_app or 'Not Set' }}</p>
-<p><b>Alert Channel:</b> {{ current_channel or 'Not Set' }}</p>
-<p><b>Check Interval:</b> {{ check_interval }} min</p>
-<p><b>Status:</b> {{ 'ACTIVE' if MONITORING_ACTIVE else 'INACTIVE' }}</p>
+    <section class="config">
+        <h2>Configure Monitoring</h2>
+        <form method="POST" action="{{ url_for('update_config') }}">
+            <label for="app_name">HEROKU APP NAME</label>
+            <input type="text" id="app_name" name="app_name" value="{{ current_app or '' }}" required>
+            <small>Enter the exact name of the Heroku app you want to monitor</small>
 
-<h2>Configure Monitoring</h2>
-<form method="POST" action="/update-config">
-    <label for="app_name">Heroku App Name</label>
-    <input type="text" id="app_name" name="app_name" value="{{ current_app or '' }}" required>
+            <label for="slack_channel">SLACK CHANNEL</label>
+            <input type="text" id="slack_channel" name="slack_channel" value="{{ current_channel or '#alerts' }}" required>
+            <small>Channel where alerts will be posted (include the # prefix)</small>
 
-    <label for="slack_channel">Slack Channel</label>
-    <input type="text" id="slack_channel" name="slack_channel" value="{{ current_channel or '#alerts' }}" required>
+            <label for="check_interval">CHECK INTERVAL (MINUTES)</label>
+            <input type="number" id="check_interval" name="check_interval" value="{{ check_interval }}" min="1" max="60" required>
+            <small>How often to check app health (1-60 minutes)</small>
 
-    <label for="check_interval">Check Interval (minutes)</label>
-    <input type="number" id="check_interval" name="check_interval" value="{{ check_interval }}" min="1" max="60" required>
-
-    <button type="submit">Update Configuration</button>
-</form>
-
-<h2>Static Configuration</h2>
-<p>These settings are configured via environment variables and require a redeploy to change.</p>
-<p><b>HEROKU API:</b> {{ 'CONFIGURED' if HEROKU_API_CONFIGURED else 'NOT SET' }}</p>
-<p><b>SLACK BOT TOKEN:</b> {{ 'CONFIGURED' if SLACK_CONFIGURED else 'NOT SET' }}</p>
-
-</body>
-</html>
+            <button type="submit">UPDATE CONFIGURATION</button>
+        </form>
+        <p class="tip">🌵 Trail Tip: Changes take effect immediately! The monitoring bot will start kee
