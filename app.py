@@ -10,6 +10,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from typing import Dict, Optional, Any, List
 import psycopg2
+import psycopg2.extras
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
