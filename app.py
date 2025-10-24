@@ -722,6 +722,18 @@ def format_dyno_status(dynos: Optional[list[dict]]) -> str:
         lines.append(f"• {t}: {info['total']} dynos ({states_str})")
     return '\n'.join(lines)
 
+
+# --------------------------
+# Scheduler Auto-Start
+# --------------------------
+if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
+    logger.info("Starting scheduler on boot for primary dyno...")
+    try:
+        restart_scheduler()
+    except Exception as e:
+        logger.error(f"Error starting scheduler on boot: {e}")
+
+
 # --------------------------
 # Run Flask
 # --------------------------
