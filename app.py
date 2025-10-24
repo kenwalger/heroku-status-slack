@@ -352,7 +352,7 @@ def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
     """
     # Compute hash of current config
     config_json = json.dumps(config_vars, sort_keys=True)
-    config_hash = int(hashlib.sha256(config_json.encode('utf-8')).hexdigest()
+    config_hash = int(hashlib.sha256(config_json.encode('utf-8')).hexdigest())
     last_hash = state.get('config_vars_hash')
 
     # Send Slack alert if config changed
