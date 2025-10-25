@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -34,7 +35,8 @@ dynamic_config = {
 }
 
 # Scheduler globals
-scheduler = BackgroundScheduler()
+executors = {"default": ThreadPoolExecutor(1)}
+scheduler = BackgroundScheduler(executors=executors)
 scheduler_initialized = False
 
 # Initialize Slack client
@@ -495,6 +497,48 @@ def update_db_last_release(db_conn, app_name, version, created_at):
 # Scheduler
 # --------------------------
 
+
+def scheduled_health_check(monitored_app):
+    """
+    Scheduled job function for APScheduler.
+    Runs `check_app_health` for the currently monitored app.
+    """
+    monitored_app = dynamic_config.get('monitored_app')
+    if not monitored_app:
+        logger.warning("[Scheduler] No app configured for health check")
+        return
+    
+    logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
+    try:
+        # Use the real DB-loading function
+        state = load_app_state(monitored_app)
+        check_app_health(monitored_app)  # this will update state and persist
+    except Exception as e:
+        logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
+
+
+# --- Scheduler initialization ---
+def initialize_scheduler(monitored_app, interval_minutes: int = 1):
+    if not scheduler.running:
+        scheduler.start()
+        logger.info("Scheduler started")
+
+    job_id = "health_check"
+
+    # Prevent duplicate job registration
+    if not scheduler.get_job(job_id):
+        scheduler.add_job(
+            func=lambda: scheduled_health_check(monitored_app),
+            trigger="interval",
+            minutes=interval_minutes,
+            id=job_id,
+            name="Periodic health check",
+            max_instances=1,  # prevent overlapping runs
+            replace_existing=True,  # overwrite if it somehow exists
+        )
+        logger.info(f"Registered job '{job_id}' for {monitored_app}")
+
+
 def initialize_scheduler_once():
     global scheduler_initialized
     # Only start scheduler in the first web dyno
@@ -789,7 +833,7 @@ def format_dyno_status(dynos: Optional[list[dict]]) -> str:
 # --------------------------
 if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
     restart_scheduler()
-    
+
 
 # --------------------------
 # Run Flask
