@@ -440,8 +440,8 @@ def check_app_health(app_name: str) -> None:
     releases = heroku_client.get_releases(app_name, limit=3)
     config_vars = heroku_client.get_config_vars(app_name)
 
-    logger.info(f"[Health] Dynos: {dynos}")
-    logger.info(f"[Health] Releases: {releases}")
+    logger.info(f"[Health] Dynos: {[d['name'] + ':' + d['state'] for d in dynos]}")
+    logger.info(f"[Health] Releases: {releases[-1]['description']} (v{releases[-1]['version']})")
     logger.info(f"[Health] Config vars: {config_vars}")
 
     if dynos:
