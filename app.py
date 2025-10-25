@@ -211,7 +211,10 @@ class HerokuAPIClient:
         Returns:
             Optional[list[dict]]: List of release dictionaries or None if request fails.
         """
-        return self._request('GET', f'/apps/{app_name}/releases?order=desc', params={'limit': limit})
+        releases = self._request('GET', f'/apps/{app_name}/releases')
+        if releases:
+            return sorted(releases, key=lambda r: r['version'], reverse=True)[:limit]
+        return []
 
     def get_addons(self, app_name: str) -> Optional[list[dict]]:
         """
@@ -447,7 +450,8 @@ def check_app_health(app_name: str) -> None:
     if dynos:
         check_dyno_health(app_name, dynos, state)
     if releases:
-        check_recent_releases(app_name, releases, state)
+        releases_sorted = sorted(releases, key=lambda r: r['version'], reverse=True)
+        check_recent_releases(app_name, releases_sorted, state)
     if config_vars:
         check_config_changes(app_name, config_vars, state)
 
