@@ -127,7 +127,7 @@ def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
                     updated_at = EXCLUDED.updated_at
             """, (
                 app_name,
-                state.get('last_release'),
+                state.get('last_release') or '',
                 json.dumps(state.get('dynos', {})),  # ensure we always save JSON string
                 state.get('config_vars_hash'),
                 datetime.now(timezone.utc).isoformat()
@@ -332,7 +332,7 @@ def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> N
         return
 
     latest = releases[0]
-    release_version = latest.get('version')
+    release_version = str(latest.get('version'))
     last_known = state.get('last_release')
 
     if last_known is not None and last_known != release_version:
