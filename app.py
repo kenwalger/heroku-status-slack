@@ -536,7 +536,9 @@ def restart_scheduler() -> None:
         minutes=interval,
         id='health_check',
         name='Periodic health check',
-        replace_existing=True
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
     )
 
     if not scheduler.running:
@@ -545,16 +547,6 @@ def restart_scheduler() -> None:
     else:
         logger.info(f"Scheduler updated: checking {monitored_app} every {interval} minutes")
 
-
-@app.before_request
-def initialize_scheduler():
-    """
-    Ensure the scheduler starts once per web dyno.
-    """
-    global scheduler_initialized
-    if not scheduler_initialized and dynamic_config.get('monitored_app'):
-        restart_scheduler()
-        scheduler_initialized = True
 
 # --------------------------
 # Flask routes
