@@ -451,6 +451,7 @@ def check_app_health(app_name: str) -> None:
     if config_vars:
         check_config_changes(app_name, config_vars, state)
 
+    logger.info(f"[DB] About to save state: {state}")
     save_app_state(app_name, state)
 
 
