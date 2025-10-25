@@ -469,9 +469,9 @@ def update_db_last_release(db_conn, app_name, version, created_at):
             DO UPDATE SET last_release = EXCLUDED.last_release,
                           updated_at = EXCLUDED.updated_at
         """, (app_name, version, created_at))
+        rows = cur.rowcount
+        logger.info(f"Updated {rows} rows for {app_name}")
     db_conn.commit()
-    rows = cur.rowcount
-    logger.info(f"Updated {rows} rows for {app_name}")
 
 
 # --------------------------
