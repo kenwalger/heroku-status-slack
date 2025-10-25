@@ -113,8 +113,9 @@ def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
     Returns:
         None
     """
-    conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
+    conn = None
     try:
+        conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO app_state (app_name, last_release, dynos, config_vars_hash, updated_at)
@@ -132,8 +133,12 @@ def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
                 datetime.now(timezone.utc).isoformat()
             ))
             conn.commit()
+            logger.info(f"[DB] Successfully commited state for {app_name}")
+    except Exception as e:
+        logger.error(f"[DB] Failed to save state for {app_name}: {e}")
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 # --------------------------
@@ -426,11 +431,18 @@ def check_app_health(app_name: str) -> None:
         logger.warning("Heroku client not configured")
         return
 
+    logger.info(f"[Health] Checking health for {app_name}")
+
     state = load_app_state(app_name) or {}
+    logger.info(f"[Health] Loaded state from DB: {state}")
 
     dynos = heroku_client.get_dynos(app_name)
     releases = heroku_client.get_releases(app_name, limit=3)
     config_vars = heroku_client.get_config_vars(app_name)
+
+    logger.info(f"[Health] Dynos: {dynos}")
+    logger.info(f"[Health] Releases: {releases}")
+    logger.info(f"[Health] Config vars: {config_vars}")
 
     if dynos:
         check_dyno_health(app_name, dynos, state)
@@ -492,6 +504,7 @@ def scheduled_health_check() -> None:
     """
     monitored_app = dynamic_config.get('monitored_app')
     if not monitored_app:
+        logger.warning("[Scheduler] No app configured for health check")
         return
     
     logger.info(f"Running scheduled check for: {monitored_app}")
@@ -660,6 +673,24 @@ def slack_command() -> Any:
 
     threading.Thread(target=fetch_and_post_status, args=(app_name, response_url)).start()
     return jsonify({'response_type': 'ephemeral', 'text': f"⏳ Fetching status for `{app_name}`..."})
+
+# ---------------
+# Debugging Route
+# ---------------
+@app.route('/test-db')
+def test_db():
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        with conn.cursor() as cur:
+            cur.execute("SELECT NOW()")
+            result = cur.fetchone()
+        return jsonify({'status': 'ok', 'db_time': str(result[0])})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)})
+    finally:
+        if conn:
+            conn.close()
+
 
 def fetch_and_post_status(app_name: str, response_url: str) -> None:
     """
