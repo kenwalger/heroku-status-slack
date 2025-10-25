@@ -133,7 +133,7 @@ def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
                 datetime.now(timezone.utc).isoformat()
             ))
             conn.commit()
-            logger.info(f"[DB] Successfully commited state for {app_name}")
+            logger.info(f"[DB] Successfully committed state for {app_name}")
     except Exception as e:
         logger.error(f"[DB] Failed to save state for {app_name}: {e}")
     finally:
@@ -788,16 +788,8 @@ def format_dyno_status(dynos: Optional[list[dict]]) -> str:
 # Scheduler Auto-Start
 # --------------------------
 if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
-    logger.info("Starting scheduler on boot for primary dyno...")
-    try:
-        restart_scheduler()
-        # Run a single immediate check to initialize DB state
-        monitored_app = dynamic_config.get('monitored_app')
-        if monitored_app:
-            check_app_health(monitored_app)  # handles DB update and Slack
-    except Exception as e:
-        logger.error(f"Error starting scheduler on boot: {e}")
-
+    restart_scheduler()
+    
 
 # --------------------------
 # Run Flask
