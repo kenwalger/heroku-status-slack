@@ -63,25 +63,19 @@ def _restart_scheduler_impl(heroku_client) -> None:
         logger.info("Scheduler not started: no app configured or invalid interval")
         return
 
-    # CRITICAL: Check if job already exists first
-    existing_job = scheduler.get_job('health_check')
-    if existing_job:
-        logger.info("Health check job already exists, marking as initialized")
-        _scheduler_initialized = True
-        return
+    # AGGRESSIVE: Remove ALL health_check jobs to prevent duplicates
+    all_jobs = scheduler.get_jobs()
+    for job in all_jobs:
+        if job.id == 'health_check':
+            try:
+                scheduler.remove_job('health_check')
+                logger.info(f"Removed existing health_check job before registration")
+            except Exception as e:
+                logger.warning(f"Failed to remove job: {e}")
 
-    # Remove any existing job (extra safety)
-    try:
-        removed = scheduler.remove_job('health_check')
-        logger.info(f"Removed existing health_check job")
-    except Exception as e:
-        # Job doesn't exist, which is fine
-        logger.debug(f"No existing job to remove: {e}")
-
-    # Double-check job doesn't exist before adding
+    # Triple-check: verify no job exists now
     if scheduler.get_job('health_check'):
-        logger.warning("Job already exists just before add_job call! This should not happen.")
-        _scheduler_initialized = True
+        logger.error("ERROR: Job still exists after removal attempt!")
         return
     
     # Add job - using replace_existing=True as defense in depth
@@ -109,6 +103,10 @@ def _restart_scheduler_impl(heroku_client) -> None:
     health_check_jobs = [j for j in jobs if j.id == 'health_check']
     if len(health_check_jobs) > 1:
         logger.error(f"ERROR: Found {len(health_check_jobs)} health_check jobs! This should never happen.")
+        # Remove all but the first one
+        for job in health_check_jobs[1:]:
+            logger.error(f"Removing duplicate job: {job}")
+            scheduler.remove_job(job.id)
     else:
         logger.info(f"Verified: {len(health_check_jobs)} health_check job(s) exist")
 
