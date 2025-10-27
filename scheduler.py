@@ -51,6 +51,11 @@ def _restart_scheduler_impl(heroku_client) -> None:
     """
     global _scheduler_initialized
     
+    # Abort if already initialized with a job
+    if _scheduler_initialized:
+        logger.info("Scheduler already initialized, skipping restart")
+        return
+    
     monitored_app = dynamic_config.get('monitored_app')
     interval = dynamic_config.get('check_interval', 5)
 
@@ -58,6 +63,7 @@ def _restart_scheduler_impl(heroku_client) -> None:
         logger.info("Scheduler not started: no app configured or invalid interval")
         return
 
+    # Remove any existing job
     try:
         scheduler.remove_job('health_check')
         logger.info("Removed existing health_check job")
@@ -65,7 +71,7 @@ def _restart_scheduler_impl(heroku_client) -> None:
         # Job doesn't exist, which is fine
         pass
 
-    # Add job with replace_existing=True to prevent duplicates
+    # Add job - using replace_existing=True as defense in depth
     scheduler.add_job(
         func=lambda: scheduled_health_check(heroku_client),
         trigger="interval",
@@ -85,6 +91,7 @@ def _restart_scheduler_impl(heroku_client) -> None:
     else:
         logger.info(f"Scheduler job updated: checking {monitored_app} every {interval} minutes")
     
+    # Mark as initialized ONLY after successfully registering job
     _scheduler_initialized = True
 
 
@@ -96,8 +103,12 @@ def restart_scheduler(heroku_client) -> None:
     Args:
         heroku_client: Initialized HerokuAPIClient instance.
     """
+    global _scheduler_initialized
+    
     # Use lock to prevent concurrent registration
     with _scheduler_lock:
+        # Reset flag to allow restart
+        _scheduler_initialized = False
         _restart_scheduler_impl(heroku_client)
 
 
@@ -115,10 +126,18 @@ def initialize_scheduler(heroku_client) -> None:
         with _scheduler_lock:
             if _scheduler_initialized:
                 logger.info("Scheduler already initialized, skipping auto-start")
-            elif scheduler.get_job('health_check'):
-                logger.info("Health check job already registered, skipping auto-start")
+                return
+            
+            if scheduler.get_job('health_check'):
+                logger.info("Health check job already registered, marking as initialized")
                 _scheduler_initialized = True
-            elif not scheduler.running:
-                logger.info("Starting scheduler on web.1 dyno")
-                _restart_scheduler_impl(heroku_client)
+                return
+            
+            if scheduler.running:
+                logger.info("Scheduler already running, marking as initialized")
+                _scheduler_initialized = True
+                return
+            
+            logger.info("Starting scheduler on web.1 dyno")
+            _restart_scheduler_impl(heroku_client)
 
