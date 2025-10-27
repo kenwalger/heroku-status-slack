@@ -497,55 +497,6 @@ def update_db_last_release(db_conn, app_name, version, created_at):
 # Scheduler
 # --------------------------
 
-
-def scheduled_health_check(monitored_app):
-    """
-    Scheduled job function for APScheduler.
-    Runs `check_app_health` for the currently monitored app.
-    """
-    monitored_app = dynamic_config.get('monitored_app')
-    if not monitored_app:
-        logger.warning("[Scheduler] No app configured for health check")
-        return
-    
-    logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
-    try:
-        # Use the real DB-loading function
-        state = load_app_state(monitored_app)
-        check_app_health(monitored_app)  # this will update state and persist
-    except Exception as e:
-        logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
-
-
-# --- Scheduler initialization ---
-def initialize_scheduler(monitored_app, interval_minutes: int = 1):
-    if not scheduler.running:
-        scheduler.start()
-        logger.info("Scheduler started")
-
-    job_id = "health_check"
-
-    # Prevent duplicate job registration
-    if not scheduler.get_job(job_id):
-        scheduler.add_job(
-            func=lambda: scheduled_health_check(monitored_app),
-            trigger="interval",
-            minutes=interval_minutes,
-            id=job_id,
-            name="Periodic health check",
-            max_instances=1,  # prevent overlapping runs
-            replace_existing=True,  # overwrite if it somehow exists
-        )
-        logger.info(f"Registered job '{job_id}' for {monitored_app}")
-
-
-def initialize_scheduler_once():
-    global scheduler_initialized
-    # Only start scheduler in the first web dyno
-    if not scheduler_initialized and os.environ.get("DYNO", "").startswith("web.1"):
-        restart_scheduler()
-        scheduler_initialized = True
-
 def scheduled_health_check() -> None:
     """
     Scheduled job function for the APScheduler.
@@ -556,8 +507,11 @@ def scheduled_health_check() -> None:
         logger.warning("[Scheduler] No app configured for health check")
         return
     
-    logger.info(f"Running scheduled check for: {monitored_app}")
-    check_app_health(monitored_app)
+    logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
+    try:
+        check_app_health(monitored_app)
+    except Exception as e:
+        logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
 
 def restart_scheduler() -> None:
     """
@@ -571,8 +525,12 @@ def restart_scheduler() -> None:
         logger.info("Scheduler not started: no app configured or invalid interval")
         return
 
-    if scheduler.get_job('health_check'):
+    try:
         scheduler.remove_job('health_check')
+        logger.info("Removed existing health_check job")
+    except Exception:
+        # Job doesn't exist, which is fine
+        pass
 
     scheduler.add_job(
         func=scheduled_health_check,
@@ -584,6 +542,7 @@ def restart_scheduler() -> None:
         max_instances=1,
         coalesce=True
     )
+    logger.info(f"Added health_check job with interval {interval} minutes")
 
     if not scheduler.running:
         scheduler.start()
@@ -831,8 +790,12 @@ def format_dyno_status(dynos: Optional[list[dict]]) -> str:
 # --------------------------
 # Scheduler Auto-Start
 # --------------------------
-if os.environ.get("DYNO", "").startswith("web.1") and not scheduler.running:
-    restart_scheduler()
+if os.environ.get("DYNO", "").startswith("web.1"):
+    if scheduler.get_job('health_check'):
+        logger.info("Health check job already registered, skipping auto-start")
+    elif not scheduler.running:
+        logger.info("Starting scheduler on web.1 dyno")
+        restart_scheduler()
 
 
 # --------------------------
