@@ -66,7 +66,7 @@ def _restart_scheduler_impl(heroku_client) -> None:
     # CRITICAL: Check if job already exists first
     existing_job = scheduler.get_job('health_check')
     if existing_job:
-        logger.info(f"Health check job already exists (next run: {existing_job.next_run_time}), marking as initialized")
+        logger.info("Health check job already exists, marking as initialized")
         _scheduler_initialized = True
         return
 
@@ -102,7 +102,7 @@ def _restart_scheduler_impl(heroku_client) -> None:
         logger.error("ERROR: Job was not added successfully!")
         return
         
-    logger.info(f"Registered health_check job with interval {interval} minutes (next run: {added_job.next_run_time})")
+    logger.info(f"Registered health_check job with interval {interval} minutes")
     
     # Verify only one job exists
     jobs = scheduler.get_jobs()
@@ -162,7 +162,7 @@ def initialize_scheduler(heroku_client) -> None:
             
             existing_job = scheduler.get_job('health_check')
             if existing_job:
-                logger.info(f"[INIT] Health check job already registered (next: {existing_job.next_run_time}), marking as initialized")
+                logger.info("[INIT] Health check job already registered, marking as initialized")
                 _scheduler_initialized = True
                 return
             
