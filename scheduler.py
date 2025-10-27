@@ -6,6 +6,7 @@ health checks.
 """
 import os
 import logging
+import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 # Scheduler globals
 executors = {"default": ThreadPoolExecutor(1)}
 scheduler = BackgroundScheduler(executors=executors)
+
+# Lock to prevent duplicate job registration
+_scheduler_lock = threading.Lock()
+_scheduler_initialized = False
 
 
 def scheduled_health_check(heroku_client) -> None:
@@ -39,14 +44,13 @@ def scheduled_health_check(heroku_client) -> None:
         logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
 
 
-def restart_scheduler(heroku_client) -> None:
+def _restart_scheduler_impl(heroku_client) -> None:
     """
-    Restart or initialize the scheduler with the current monitored app and interval.
-    Removes existing job if present, updates interval, and starts scheduler if needed.
-
-    Args:
-        heroku_client: Initialized HerokuAPIClient instance.
+    Internal implementation of restart_scheduler without lock acquisition.
+    Call restart_scheduler() instead.
     """
+    global _scheduler_initialized
+    
     monitored_app = dynamic_config.get('monitored_app')
     interval = dynamic_config.get('check_interval', 5)
 
@@ -61,6 +65,7 @@ def restart_scheduler(heroku_client) -> None:
         # Job doesn't exist, which is fine
         pass
 
+    # Add job with replace_existing=True to prevent duplicates
     scheduler.add_job(
         func=lambda: scheduled_health_check(heroku_client),
         trigger="interval",
@@ -71,13 +76,29 @@ def restart_scheduler(heroku_client) -> None:
         max_instances=1,
         coalesce=True
     )
-    logger.info(f"Added health_check job with interval {interval} minutes")
+    logger.info(f"Registered health_check job with interval {interval} minutes")
 
+    # Start scheduler if not running
     if not scheduler.running:
         scheduler.start()
         logger.info(f"Scheduler started: checking {monitored_app} every {interval} minutes")
     else:
-        logger.info(f"Scheduler updated: checking {monitored_app} every {interval} minutes")
+        logger.info(f"Scheduler job updated: checking {monitored_app} every {interval} minutes")
+    
+    _scheduler_initialized = True
+
+
+def restart_scheduler(heroku_client) -> None:
+    """
+    Restart or initialize the scheduler with the current monitored app and interval.
+    Removes existing job if present, updates interval, and starts scheduler if needed.
+
+    Args:
+        heroku_client: Initialized HerokuAPIClient instance.
+    """
+    # Use lock to prevent concurrent registration
+    with _scheduler_lock:
+        _restart_scheduler_impl(heroku_client)
 
 
 def initialize_scheduler(heroku_client) -> None:
@@ -87,10 +108,17 @@ def initialize_scheduler(heroku_client) -> None:
     Args:
         heroku_client: Initialized HerokuAPIClient instance.
     """
+    global _scheduler_initialized
+    
     if os.environ.get("DYNO", "").startswith("web.1"):
-        if scheduler.get_job('health_check'):
-            logger.info("Health check job already registered, skipping auto-start")
-        elif not scheduler.running:
-            logger.info("Starting scheduler on web.1 dyno")
-            restart_scheduler(heroku_client)
+        # Use lock to prevent concurrent initialization
+        with _scheduler_lock:
+            if _scheduler_initialized:
+                logger.info("Scheduler already initialized, skipping auto-start")
+            elif scheduler.get_job('health_check'):
+                logger.info("Health check job already registered, skipping auto-start")
+                _scheduler_initialized = True
+            elif not scheduler.running:
+                logger.info("Starting scheduler on web.1 dyno")
+                _restart_scheduler_impl(heroku_client)
 
