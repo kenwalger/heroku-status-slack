@@ -23,6 +23,10 @@ scheduler = BackgroundScheduler(executors=executors)
 _scheduler_lock = threading.Lock()
 _scheduler_initialized = False
 
+# Execution lock to prevent concurrent job execution
+_execution_lock = threading.Lock()
+_job_running = False
+
 
 def scheduled_health_check(heroku_client) -> None:
     """
@@ -32,16 +36,30 @@ def scheduled_health_check(heroku_client) -> None:
     Args:
         heroku_client: Initialized HerokuAPIClient instance.
     """
+    global _job_running
+    
     monitored_app = dynamic_config.get('monitored_app')
     if not monitored_app:
         logger.warning("[Scheduler] No app configured for health check")
         return
     
-    logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
+    # Prevent concurrent execution if duplicate jobs somehow exist
+    # Check and set flag atomically
+    with _execution_lock:
+        if _job_running:
+            logger.warning("[Scheduler] Health check already running, skipping duplicate job execution")
+            return
+        # Set flag WHILE holding the lock
+        _job_running = True
+    
     try:
+        logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
         check_app_health(monitored_app, heroku_client)
     except Exception as e:
         logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
+    finally:
+        with _execution_lock:
+            _job_running = False
 
 
 def _restart_scheduler_impl(heroku_client) -> None:
