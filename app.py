@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from typing import Dict, Any, List, Optional
 
-from config import HEROKU_API_KEY, SLACK_BOT_TOKEN, DATABASE_URL, dynamic_config
+from config import HEROKU_API_KEY, SLACK_BOT_TOKEN, DATABASE_URL, dynamic_config, BOT_APP_NAME
 from database import get_db_connection
 from heroku_client import HerokuAPIClient
 from slack_integration import send_slack_message
@@ -46,6 +46,7 @@ def index() -> str:
     return render_template(
         'dashboard.html',
         current_app=dynamic_config.get('monitored_app', ''),
+        bot_app_name=BOT_APP_NAME or '',
         current_channel=dynamic_config.get('slack_channel', '#alerts'),
         check_interval=dynamic_config.get('check_interval', 5),
         monitoring_active=bool(dynamic_config.get('monitored_app') and HEROKU_API_KEY and SLACK_BOT_TOKEN),
@@ -63,6 +64,7 @@ def update_config() -> Any:
         Flask redirect response back to the dashboard with optional query parameters.
     """
     app_name = request.form.get('app_name', '').strip()
+    bot_app_name = request.form.get('bot_app_name', '').strip()
     slack_channel = request.form.get('slack_channel', '').strip()
     check_interval_str = request.form.get('check_interval', '').strip()
 
@@ -79,10 +81,45 @@ def update_config() -> Any:
     old_app = dynamic_config.get('monitored_app')
     old_interval = dynamic_config.get('check_interval')
 
+    # Update in-memory config
     dynamic_config['monitored_app'] = app_name
     dynamic_config['slack_channel'] = slack_channel
     dynamic_config['check_interval'] = check_interval
 
+    # Determine which app's config vars to update
+    # Use form value, then BOT_APP_NAME config var, then fall back to monitored app
+    bot_app_for_update = bot_app_name or BOT_APP_NAME or app_name
+    
+    # Update Heroku config vars to persist changes
+    if bot_app_for_update and heroku_client:
+        try:
+            config_updates = {
+                'MONITORED_APP_NAME': app_name,
+                'SLACK_CHANNEL': slack_channel,
+                'CHECK_INTERVAL_MINUTES': str(check_interval)
+            }
+            
+            # If user provided a bot_app_name in the form, also save that config var
+            if bot_app_name:
+                config_updates['BOT_APP_NAME'] = bot_app_name
+            
+            result = heroku_client.update_config_vars(bot_app_for_update, config_updates)
+            if result:
+                logger.info(f"Updated Heroku config vars for {bot_app_for_update}: {config_updates}")
+            else:
+                logger.error("Failed to update Heroku config vars")
+                # Don't fail the web request, just log the error
+                logger.warning("Continuing with in-memory config update")
+        except Exception as e:
+            logger.error(f"Error updating Heroku config vars: {e}")
+            logger.warning(f"Continuing with in-memory config update despite error: {e}")
+    else:
+        if not bot_app_for_update:
+            logger.warning("Could not determine app name - updates will work in-memory only (lost on restart)")
+        if not heroku_client:
+            logger.warning("Heroku client not available")
+
+    # Restart scheduler if interval or app changed
     if old_app != app_name or old_interval != check_interval:
         restart_scheduler(heroku_client)
 

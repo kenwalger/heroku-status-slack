@@ -51,7 +51,7 @@
                     <h2>Configure Monitoring</h2>
 
                     <div class="form-group">
-                        <label for="app_name">Heroku App Name</label>
+                        <label for="app_name">App to Monitor</label>
                         <input
                             type="text"
                             id="app_name"
@@ -60,7 +60,19 @@
                             value="{{ current_app or '' }}"
                             required
                         >
-                        <small>Enter the exact name of the Heroku app you want to monitor</small>
+                        <small>The Heroku app you want to monitor for deploys, dyno crashes, and config changes</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="bot_app_name">Monitoring Bot App Name</label>
+                        <input
+                            type="text"
+                            id="bot_app_name"
+                            name="bot_app_name"
+                            placeholder="Leave empty to auto-detect"
+                            value="{{ bot_app_name or '' }}"
+                        >
+                        <small>The Heroku app name of this monitoring bot (usually same as app above). Leave empty for auto-detection.</small>
                     </div>
 
                     <div class="form-group">

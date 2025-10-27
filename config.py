@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY')
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
+BOT_APP_NAME = os.environ.get('BOT_APP_NAME')  # Name of this monitoring bot app on Heroku
 
 # Dynamic configuration (can be changed via web UI)
 dynamic_config = {

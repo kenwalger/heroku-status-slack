@@ -121,3 +121,16 @@ class HerokuAPIClient:
         """
         return self._request('GET', f'/apps/{app_name}/formation')
 
+    def update_config_vars(self, app_name: str, config_vars: Dict[str, str]) -> Optional[dict]:
+        """
+        Update configuration variables for a Heroku app.
+
+        Args:
+            app_name (str): Heroku app name.
+            config_vars (Dict[str, str]): Dictionary of config vars to set/update.
+
+        Returns:
+            Optional[dict]: Updated config vars dictionary or None if request fails.
+        """
+        return self._request('PATCH', f'/apps/{app_name}/config-vars', json=config_vars)
+
