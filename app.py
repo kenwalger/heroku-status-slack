@@ -1,19 +1,23 @@
+"""
+Heroku Monitoring Bot - Flask Application
+
+Main Flask app that provides web UI and API endpoints for monitoring Heroku apps.
+"""
 import os
-import hashlib
-import json
 import logging
 import threading
+import requests
+import psycopg2
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template, redirect, url_for
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.executors.pool import ThreadPoolExecutor
-import requests
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
-from typing import Dict, Optional, Any, List
-import psycopg2
-import psycopg2.extras
+from typing import Dict, Any, List, Optional
 
+from config import HEROKU_API_KEY, SLACK_BOT_TOKEN, DATABASE_URL, dynamic_config
+from database import get_db_connection
+from heroku_client import HerokuAPIClient
+from slack_integration import send_slack_message
+from health_checker import check_app_health
+from scheduler import scheduler, restart_scheduler, initialize_scheduler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,534 +25,11 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-
-# Static configuration from environment variables
-HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY')
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
-DATABASE_URL = os.environ.get('DATABASE_URL')  # Heroku Postgres URL
-
-# Dynamic configuration (can be changed via web UI)
-dynamic_config = {
-    'monitored_app': os.environ.get('MONITORED_APP_NAME', ''),
-    'slack_channel': os.environ.get('SLACK_CHANNEL', '#alerts'),
-    'check_interval': int(os.environ.get('CHECK_INTERVAL_MINUTES', '5'))
-}
-
-# Scheduler globals
-executors = {"default": ThreadPoolExecutor(1)}
-scheduler = BackgroundScheduler(executors=executors)
-scheduler_initialized = False
-
-# Initialize Slack client
-slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
-
-# --------------------------
-# Database helpers
-# --------------------------
-def get_db_connection() -> psycopg2.extensions.connection:
-    """
-    Create and return a new database connection to the configured Postgres database.
-
-    Returns:
-        psycopg2.extensions.connection: Active database connection.
-    """
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
-
-def load_app_state(app_name:str) -> Dict[str, Any]:
-    """
-    Load the persisted monitoring state for a given Heroku app.
-
-    Args:
-        app_name (str): Name of the Heroku app.
-
-    Returns:
-        Dict[str, Any]: Dictionary containing:
-            - 'last_release': str | None
-            - 'dynos': dict[str, str]  # dyno name -> state
-            - 'config_vars_hash': int | None
-            - 'updated_at': datetime | None
-    """
-    state = {
-        'last_release': None,
-        'dynos': {},
-        'config_vars_hash': None,
-        'updated_at': None
-    }
-
-    conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT * FROM app_state WHERE app_name = %s", (app_name,))
-            row = cur.fetchone()
-            if row:
-                state['last_release'] = row['last_release']
-                # dynos stored as JSONB in Postgres; if already a dict, just use it
-                dynos = row['dynos']
-                if isinstance(dynos, str):
-                    state['dynos'] = json.loads(dynos)
-                elif isinstance(dynos, dict):
-                    state['dynos'] = dynos
-                else:
-                    state['dynos'] = {}
-                state['config_vars_hash'] = row['config_vars_hash']
-                state['updated_at'] = row['updated_at']
-            else:
-                state['config_vars_hash'] = None
-                state['dynos'] = {}
-                state['last_release'] = None
-                state['updated_at'] = None
-    finally:
-        conn.close()
-
-    return state
-
-
-def save_app_state(app_name:str, state: Dict[str, Any]) -> None:
-    """
-    Persist monitoring state for a Heroku app to Postgres.
-
-    Args:
-        app_name (str): Name of the app.
-        state (Dict[str, Any]): State dict to persist. Expected keys:
-            'last_release', 'dynos', 'config_vars_hash', 'updated_at'.
-
-    Returns:
-        None
-    """
-    conn = None
-    try:
-        conn = psycopg2.connect(dsn=os.environ['DATABASE_URL'])
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO app_state (app_name, last_release, dynos, config_vars_hash, updated_at)
-                VALUES (%s, %s, %s::jsonb, %s, %s)
-                ON CONFLICT (app_name) DO UPDATE
-                SET last_release = EXCLUDED.last_release,
-                    dynos = EXCLUDED.dynos,
-                    config_vars_hash = EXCLUDED.config_vars_hash,
-                    updated_at = EXCLUDED.updated_at
-            """, (
-                app_name,
-                state.get('last_release') or '',
-                json.dumps(state.get('dynos', {})),  # ensure we always save JSON string
-                state.get('config_vars_hash'),
-                datetime.now(timezone.utc).isoformat()
-            ))
-            conn.commit()
-            logger.info(f"[DB] Successfully committed state for {app_name}")
-    except Exception as e:
-        logger.error(f"[DB] Failed to save state for {app_name}: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-
-# --------------------------
-# Heroku API Client
-# --------------------------
-class HerokuAPIClient:
-    BASE_URL = 'https://api.heroku.com'
-
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.headers = {
-            'Accept': 'application/vnd.heroku+json; version=3',
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type': 'application/json'
-        }
-
-    def _request(self, method: str, endpoint: str, **kwargs) -> Optional[dict]:
-        """
-        Make a request to the Heroku API.
-
-        Args:
-            method (str): HTTP method, e.g., 'GET', 'POST'.
-            endpoint (str): API endpoint path.
-            **kwargs: Additional arguments for requests.request.
-
-        Returns:
-            Optional[dict]: Parsed JSON response or None on failure.
-        """
-        url = f"{self.BASE_URL}{endpoint}"
-        try:
-            response = requests.request(method, url, headers=self.headers, **kwargs)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Heroku API request failed: {e}")
-            return None
-
-    def get_app_info(self, app_name: str) -> Optional[dict]:
-        """
-        Get general information for a Heroku app.
-
-        Args:
-            app_name (str): Heroku app name.
-
-        Returns:
-            Optional[dict]: App info dictionary or None if request fails.
-        """
-        return self._request('GET', f'/apps/{app_name}')
-
-    def get_dynos(self, app_name: str) -> Optional[list[dict]]:
-        """
-        Get the dyno states for a Heroku app.
-
-        Args:
-            app_name (str): The Heroku app name.
-
-        Returns:
-            Optional[list[dict]]: List of dyno info dictionaries or None if request fails.
-        """
-        return self._request('GET', f'/apps/{app_name}/dynos')
-
-    def get_releases(self, app_name: str, limit: int = 5) -> Optional[list[dict]]:
-        """
-        Get recent releases for a Heroku app.
-
-        Args:
-            app_name (str): Heroku app name.
-            limit (int): Maximum number of releases to fetch.
-
-        Returns:
-            Optional[list[dict]]: List of release dictionaries or None if request fails.
-        """
-        releases = self._request('GET', f'/apps/{app_name}/releases')
-        if releases:
-            return sorted(releases, key=lambda r: r['version'], reverse=True)[:limit]
-        return []
-
-    def get_addons(self, app_name: str) -> Optional[list[dict]]:
-        """
-        Get installed add-ons for a Heroku app.
-
-        Args:
-            app_name (str): Heroku app name.
-
-        Returns:
-            Optional[list[dict]]: List of add-on dictionaries or None if request fails.
-        """
-        return self._request('GET', f'/apps/{app_name}/addons')
-
-    def get_config_vars(self, app_name: str) -> Optional[dict]:
-        """
-        Get configuration variables for a Heroku app.
-
-        Args:
-            app_name (str): Heroku app name.
-
-        Returns:
-            Optional[dict]: Dictionary of config vars or None if request fails.
-        """
-        return self._request('GET', f'/apps/{app_name}/config-vars')
-
-    def get_formation(self, app_name: str) -> Optional[list[dict]]:
-        """
-        Get the dyno formation (type/size/quantity) for a Heroku app.
-
-        Args:
-            app_name (str): Heroku app name.
-
-        Returns:
-            Optional[list[dict]]: List of formation dictionaries or None if request fails.
-        """
-        return self._request('GET', f'/apps/{app_name}/formation')
-
-
-# Initialize Heroku client
+# Initialize clients
 heroku_client = HerokuAPIClient(HEROKU_API_KEY) if HEROKU_API_KEY else None
 
-# --------------------------
-# Slack messaging
-# --------------------------
-def send_slack_message(text: str, 
-                       blocks: Optional[List[Dict[str, Any]]] = None, 
-                       channel: Optional[str]=None
-                       ) -> None:
-    
-    """
-    Send a message to a Slack channel using the Slack WebClient.
-
-    Args:
-        text (str): The message text to send.
-        blocks (Optional[List[Dict[str, Any]]]): Optional Slack block kit payload.
-        channel (Optional[str]): Slack channel ID or name. Defaults to configured channel.
-
-    Returns:
-        None
-    """
-    if not slack_client:
-        logger.warning("Slack client not configured, skipping message")
-        return
-
-    try:
-        slack_client.chat_postMessage(
-            channel=channel or dynamic_config['slack_channel'],
-            text=text,
-            blocks=blocks
-        )
-        logger.info(f"Slack message sent to {channel or dynamic_config['slack_channel']}: {text[:50]}...")
-    except SlackApiError as e:
-        logger.error(f"Failed to send Slack message: {e}")
-
-# --------------------------
-# Health checks
-# --------------------------
-def check_dyno_health(app_name: str, dynos: list[dict], state: dict) -> None:
-    """
-    Compare current dynos to previous state and send Slack alerts for crashes or downtime.
-
-    Args:
-        app_name (str): Heroku app name.
-        dynos (list[dict]): Current dyno info from Heroku API.
-        state (dict): Monitoring state dict; will be updated in-place.
-
-    Returns:
-        None
-    """
-    last_dynos = state.get('dynos', {})
-
-    for dyno in dynos:
-        name = dyno.get('name')
-        status = dyno.get('state')
-
-        if last_dynos.get(name) and last_dynos[name] != status:
-            if status.lower() == 'crashed':
-                send_slack_message(f"🚨 *Dyno Crash Detected* 🚨\nApp: `{app_name}`\n• {name} ({dyno.get('type')})")
-            elif status.lower() == 'down':
-                send_slack_message(f"⚠️ *Dynos Down* ⚠️\nApp: `{app_name}`\n• {name} ({dyno.get('type')})")
-
-    # Update state for next check
-    state['dynos'] = {d['name']: d['state'] for d in dynos}
-
-def check_recent_releases(app_name: str, releases: list[dict], state: dict) -> None:
-    """
-    Check for new releases and send Slack alerts if a new deploy is detected.
-
-    Args:
-        app_name (str): Heroku app name.
-        releases (list[dict]): List of recent release dictionaries.
-        state (dict): Monitoring state dict; will be updated in-place.
-
-    Returns:
-        None
-    """
-    if not releases:
-        return
-
-    latest = releases[0]
-    release_version = str(latest.get('version'))
-    last_known = state.get('last_release')
-
-    if last_known is not None and last_known != release_version:
-        user_email = latest.get('user', {}).get('email', 'Unknown')
-        created_at = latest.get('created_at', '')
-        description = latest.get('description', 'No description')
-
-        noticed_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-
-        send_slack_message(
-            f"🚀 *New Deploy Detected at {noticed_at}* 🚀\n\n"
-            f"App: `{app_name}`\n"
-            f"Version: v{release_version}\n"
-            f"Deployed by: {user_email}\n"
-            f"Description: {description}\n"
-            f"Time: {created_at}\n\n"
-            "_Monitoring for issues..._"
-        )
-
-    state['last_release'] = release_version
-
-def check_config_changes(app_name: str, config_vars: dict, state: dict) -> None:
-    """
-    Detect changes to config vars and send Slack alerts.
-
-    Args:
-        app_name (str): Heroku app name.
-        config_vars (dict): Current config vars.
-        state (dict): Monitoring state dict; will be updated in-place.
-
-    Returns:
-        None
-    """
-    last_hash = None
-    conn = None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT config_vars_hash FROM app_state WHERE app_name = %s", (app_name,))
-            row = cur.fetchone()
-            last_hash = row['config_vars_hash'] if row else None
-    except Exception as e:
-        print(f"Error loading config state for {app_name}: {e}")
-        last_hash = state.get('config_vars_hash')
-    finally:
-        if conn:
-            conn.close()
-
-
-    # Compute hash of current config
-    config_json = json.dumps(config_vars, sort_keys=True)
-    config_hash = hashlib.sha256(config_json.encode('utf-8')).hexdigest()
-
-    # Send Slack alert if config changed
-    if last_hash and last_hash != config_hash:
-        send_slack_message(
-            f"⚙️ *Config Vars Changed at {datetime.now(timezone.utc).isoformat()}* ⚙️\n"
-            f"App: `{app_name}`\nReview changes in Heroku dashboard."
-        )
-
-    # Update in-memory state
-    state['config_vars_hash'] = config_hash
-    state['updated_at'] = datetime.now(timezone.utc).isoformat()
-
-    # Persist state to DB
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        with conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute("""
-                    INSERT INTO app_state (app_name, config_vars_hash, updated_at)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (app_name) DO UPDATE
-                    SET config_vars_hash = EXCLUDED.config_vars_hash,
-                        updated_at = EXCLUDED.updated_at
-                """, (app_name, config_hash, state['updated_at']))
-        # conn automatically committed by 'with conn:'
-    except Exception as e:
-        # Log error but don’t crash scheduler
-        print(f"Error persisting config state for {app_name}: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def check_app_health(app_name: str) -> None:
-    """
-    Orchestrate the health check: dynos, releases, and config vars.
-
-    Args:
-        app_name (str): Heroku app name.
-
-    Returns:
-        None
-    """
-    if not heroku_client:
-        logger.warning("Heroku client not configured")
-        return
-
-    logger.info(f"[Health] Checking health for {app_name}")
-
-    state = load_app_state(app_name) or {}
-    logger.info(f"[Health] Loaded state from DB: {state}")
-
-    dynos = heroku_client.get_dynos(app_name)
-    releases = heroku_client.get_releases(app_name, limit=3)
-    config_vars = heroku_client.get_config_vars(app_name)
-
-    logger.info(f"[Health] Dynos: {[d['name'] + ':' + d['state'] for d in dynos]}")
-    logger.info(f"[Health] Releases: {releases[-1]['description']} (v{releases[-1]['version']})")
-    logger.info(f"[Health] Config vars: {config_vars}")
-
-    if dynos:
-        check_dyno_health(app_name, dynos, state)
-    if releases:
-        releases_sorted = sorted(releases, key=lambda r: r['version'], reverse=True)
-        check_recent_releases(app_name, releases_sorted, state)
-    if config_vars:
-        check_config_changes(app_name, config_vars, state)
-
-    logger.info(f"[DB] About to save state: {state}")
-    save_app_state(app_name, state)
-
-
-# --------------------------
-# Heroku Release Tracking Utils
-# --------------------------
-
-def get_current_release(app_name, heroku_api_key):
-    """Fetch the latest release version from Heroku API."""
-    url = f"https://api.heroku.com/apps/{app_name}/releases"
-    headers = {
-        "Accept": "application/vnd.heroku+json; version=3",
-        "Authorization": f"Bearer {heroku_api_key}"
-    }
-    resp = requests.get(url, headers=headers, timeout=10)
-    resp.raise_for_status()
-    releases = resp.json()
-    latest_release = sorted(releases, key=lambda r: r['version'], reverse=True)[0]
-    return latest_release['version'], latest_release['created_at']
-
-def update_db_last_release(db_conn, app_name, version, created_at):
-    """Update app_state table with the latest release info."""
-    with db_conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO app_state (app_name, last_release, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (app_name)
-            DO UPDATE SET last_release = EXCLUDED.last_release,
-                          updated_at = EXCLUDED.updated_at
-        """, (app_name, version, created_at))
-        rows = cur.rowcount
-        logger.info(f"Updated {rows} rows for {app_name}")
-    db_conn.commit()
-
-
-# --------------------------
-# Scheduler
-# --------------------------
-
-def scheduled_health_check() -> None:
-    """
-    Scheduled job function for the APScheduler.
-    Runs `check_app_health` for the currently monitored app.
-    """
-    monitored_app = dynamic_config.get('monitored_app')
-    if not monitored_app:
-        logger.warning("[Scheduler] No app configured for health check")
-        return
-    
-    logger.info(f"[Scheduler] Running scheduled check for: {monitored_app}")
-    try:
-        check_app_health(monitored_app)
-    except Exception as e:
-        logger.exception(f"[Scheduler] Error during health check for {monitored_app}: {e}")
-
-def restart_scheduler() -> None:
-    """
-    Restart or initialize the scheduler with the current monitored app and interval.
-    Removes existing job if present, updates interval, and starts scheduler if needed.
-    """
-    monitored_app = dynamic_config.get('monitored_app')
-    interval = dynamic_config.get('check_interval', 5)
-
-    if not monitored_app or interval <= 0:
-        logger.info("Scheduler not started: no app configured or invalid interval")
-        return
-
-    try:
-        scheduler.remove_job('health_check')
-        logger.info("Removed existing health_check job")
-    except Exception:
-        # Job doesn't exist, which is fine
-        pass
-
-    scheduler.add_job(
-        func=scheduled_health_check,
-        trigger="interval",
-        minutes=interval,
-        id='health_check',
-        name='Periodic health check',
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True
-    )
-    logger.info(f"Added health_check job with interval {interval} minutes")
-
-    if not scheduler.running:
-        scheduler.start()
-        logger.info(f"Scheduler started: checking {monitored_app} every {interval} minutes")
-    else:
-        logger.info(f"Scheduler updated: checking {monitored_app} every {interval} minutes")
+# Initialize scheduler
+initialize_scheduler(heroku_client)
 
 
 # --------------------------
@@ -571,6 +52,7 @@ def index() -> str:
         heroku_api_configured=bool(HEROKU_API_KEY),
         slack_configured=bool(SLACK_BOT_TOKEN)
     )
+
 
 @app.route('/update-config', methods=['POST'])
 def update_config() -> Any:
@@ -602,9 +84,10 @@ def update_config() -> Any:
     dynamic_config['check_interval'] = check_interval
 
     if old_app != app_name or old_interval != check_interval:
-        restart_scheduler()
+        restart_scheduler(heroku_client)
 
     return redirect(url_for('index') + '?success=true')
+
 
 @app.route('/api/status')
 def api_status() -> Dict[str, Any]:
@@ -624,6 +107,7 @@ def api_status() -> Dict[str, Any]:
         'timestamp': datetime.now(timezone.utc).isoformat()
     })
 
+
 @app.route('/health')
 def health() -> Dict[str, Any]:
     """
@@ -639,6 +123,7 @@ def health() -> Dict[str, Any]:
         'slack_channel': dynamic_config.get('slack_channel'),
         'check_interval': dynamic_config.get('check_interval')
     })
+
 
 @app.route('/slack/command', methods=['POST'])
 def slack_command() -> Any:
@@ -674,11 +159,15 @@ def slack_command() -> Any:
     threading.Thread(target=fetch_and_post_status, args=(app_name, response_url)).start()
     return jsonify({'response_type': 'ephemeral', 'text': f"⏳ Fetching status for `{app_name}`..."})
 
-# ---------------
-# Debugging Route
-# ---------------
+
 @app.route('/test-db')
 def test_db():
+    """
+    Test database connection (debugging route).
+
+    Returns:
+        Flask Response: JSON with database status.
+    """
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         with conn.cursor() as cur:
@@ -709,6 +198,7 @@ def fetch_and_post_status(app_name: str, response_url: str) -> None:
     except Exception as e:
         logger.error(f"Failed to post status for {app_name}: {e}")
         requests.post(response_url, json={'response_type': 'ephemeral', 'text': f"❌ Failed: {e}"})
+
 
 def get_app_status(app_name: str) -> str:
     """
@@ -759,12 +249,13 @@ def get_app_status(app_name: str) -> str:
 
     return status
 
-def format_dyno_status(dynos: Optional[list[dict]]) -> str:
+
+def format_dyno_status(dynos: Optional[List[dict]]) -> str:
     """
     Summarize dyno states grouped by type.
 
     Args:
-        dynos (Optional[list[dict]]): List of dyno dictionaries from Heroku API.
+        dynos (Optional[List[dict]]): List of dyno dictionaries from Heroku API.
 
     Returns:
         str: Human-readable summary of dyno states.
@@ -785,17 +276,6 @@ def format_dyno_status(dynos: Optional[list[dict]]) -> str:
         states_str = ', '.join([f"{c} {st}" for st, c in info['states'].items()])
         lines.append(f"• {t}: {info['total']} dynos ({states_str})")
     return '\n'.join(lines)
-
-
-# --------------------------
-# Scheduler Auto-Start
-# --------------------------
-if os.environ.get("DYNO", "").startswith("web.1"):
-    if scheduler.get_job('health_check'):
-        logger.info("Health check job already registered, skipping auto-start")
-    elif not scheduler.running:
-        logger.info("Starting scheduler on web.1 dyno")
-        restart_scheduler()
 
 
 # --------------------------
